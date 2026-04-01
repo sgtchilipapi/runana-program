@@ -13,7 +13,8 @@ use anchor_client::{
 };
 
 use crate::fixtures::{
-    canonical_authority_keypair, canonical_server_signer_keypair, CanonicalFixtureSet,
+    canonical_apply_battle_settlement_batch_v1_args, canonical_authority_keypair,
+    canonical_server_signer_keypair, CanonicalFixtureSet,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +38,7 @@ impl LocalnetRelayerHarness {
         Ok(Self { program })
     }
 
-    pub fn build_initialize_request_instructions(
+    pub fn build_settlement_request_instructions(
         &self,
         pre_instructions: &[Instruction],
     ) -> Result<Vec<Instruction>, ClientError> {
@@ -47,12 +48,17 @@ impl LocalnetRelayerHarness {
         }
 
         request
-            .accounts(runana_program::accounts::Initialize {})
-            .args(runana_program::instruction::Initialize {})
+            .accounts(runana_program::accounts::ApplyBattleSettlementBatchV1 {
+                player_authority: canonical_authority_keypair().pubkey(),
+                instructions_sysvar: anchor_client::solana_sdk::sysvar::instructions::ID,
+            })
+            .args(runana_program::instruction::ApplyBattleSettlementBatchV1 {
+                args: canonical_apply_battle_settlement_batch_v1_args(),
+            })
             .instructions()
     }
 
-    pub fn submit_initialize_with_pre_instructions(
+    pub fn submit_settlement_with_pre_instructions(
         &self,
         pre_instructions: &[Instruction],
     ) -> Result<Signature, ClientError> {
@@ -62,8 +68,13 @@ impl LocalnetRelayerHarness {
         }
 
         request
-            .accounts(runana_program::accounts::Initialize {})
-            .args(runana_program::instruction::Initialize {})
+            .accounts(runana_program::accounts::ApplyBattleSettlementBatchV1 {
+                player_authority: canonical_authority_keypair().pubkey(),
+                instructions_sysvar: anchor_client::solana_sdk::sysvar::instructions::ID,
+            })
+            .args(runana_program::instruction::ApplyBattleSettlementBatchV1 {
+                args: canonical_apply_battle_settlement_batch_v1_args(),
+            })
             .send()
     }
 

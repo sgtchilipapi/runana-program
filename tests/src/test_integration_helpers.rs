@@ -1,7 +1,9 @@
 use anchor_client::solana_sdk::signer::Signer;
 
 use crate::{
-    fixtures::{canonical_fixture_set, canonical_authority_keypair, canonical_server_signer_keypair},
+    fixtures::{
+        canonical_authority_keypair, canonical_fixture_set, canonical_server_signer_keypair,
+    },
     integration_helpers::{
         build_dual_ed25519_verification_instructions, build_ed25519_verification_instruction,
         sign_player_authorization, sign_server_attestation,
@@ -23,9 +25,15 @@ fn integration_helpers_sign_with_fixture_owned_keys() {
         signed_player.signer_pubkey,
         canonical_authority_keypair().pubkey()
     );
-    assert_eq!(signed_server.signer_pubkey, fixtures.program.trusted_server_signer);
+    assert_eq!(
+        signed_server.signer_pubkey,
+        fixtures.program.trusted_server_signer
+    );
     assert_eq!(signed_player.signer_pubkey, fixtures.character.authority);
-    assert_eq!(signed_server.message, fixtures.batch.server_attestation_message);
+    assert_eq!(
+        signed_server.message,
+        fixtures.batch.server_attestation_message
+    );
     assert_eq!(
         signed_player.message,
         fixtures.batch.player_authorization_message

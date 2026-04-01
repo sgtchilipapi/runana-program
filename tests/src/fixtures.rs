@@ -6,6 +6,10 @@ use anchor_client::solana_sdk::{
         Signer,
     },
 };
+use runana_program::{
+    ApplyBattleSettlementBatchV1Args, EncounterCountEntry, SettlementBatchPayloadV1,
+    ZoneProgressDeltaEntry,
+};
 
 pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
@@ -171,8 +175,7 @@ pub fn canonical_fixture_set() -> CanonicalFixtureSet {
         &program_id,
     );
 
-    let last_committed_state_hash =
-        genesis_state_hash(character_root_pubkey, character_id);
+    let last_committed_state_hash = genesis_state_hash(character_root_pubkey, character_id);
     let cursor = CanonicalCursorFixture {
         last_committed_end_nonce: 0,
         last_committed_state_hash,
@@ -378,8 +381,7 @@ pub fn derive_exp_delta(
     for entry in encounter_histogram {
         assert_eq!(entry.zone_id, zone.zone_id, "fixture expects a single zone");
         assert_eq!(
-            entry.enemy_archetype_id,
-            enemy.enemy_archetype_id,
+            entry.enemy_archetype_id, enemy.enemy_archetype_id,
             "fixture expects a single enemy archetype",
         );
         let weighted_exp_u128 = u128::from(entry.count)
@@ -445,10 +447,55 @@ pub fn canonical_admin_keypair() -> Keypair {
 }
 
 pub fn canonical_server_signer_keypair() -> Keypair {
-    keypair_from_seed(&CANONICAL_SERVER_SIGNER_SEED)
-        .expect("server signer seed should be valid")
+    keypair_from_seed(&CANONICAL_SERVER_SIGNER_SEED).expect("server signer seed should be valid")
 }
 
 pub fn canonical_relayer_keypair() -> Keypair {
     keypair_from_seed(&CANONICAL_RELAYER_SEED).expect("relayer seed should be valid")
+}
+
+pub fn canonical_apply_battle_settlement_batch_v1_args() -> ApplyBattleSettlementBatchV1Args {
+    let fixtures = canonical_fixture_set();
+    ApplyBattleSettlementBatchV1Args {
+        payload: to_program_batch_payload(&fixtures.batch.payload, fixtures.batch.batch_hash),
+    }
+}
+
+pub fn to_program_batch_payload(
+    payload: &CanonicalBatchPayloadFixture,
+    batch_hash: [u8; 32],
+) -> SettlementBatchPayloadV1 {
+    SettlementBatchPayloadV1 {
+        character_id: payload.character_id,
+        batch_id: payload.batch_id,
+        start_nonce: payload.start_nonce,
+        end_nonce: payload.end_nonce,
+        battle_count: payload.battle_count,
+        start_state_hash: payload.start_state_hash,
+        end_state_hash: payload.end_state_hash,
+        zone_progress_delta: payload
+            .zone_progress_delta
+            .iter()
+            .map(|entry| ZoneProgressDeltaEntry {
+                zone_id: entry.zone_id,
+                new_state: entry.new_state,
+            })
+            .collect(),
+        encounter_histogram: payload
+            .encounter_histogram
+            .iter()
+            .map(|entry| EncounterCountEntry {
+                zone_id: entry.zone_id,
+                enemy_archetype_id: entry.enemy_archetype_id,
+                count: entry.count,
+            })
+            .collect(),
+        optional_loadout_revision: payload.optional_loadout_revision,
+        batch_hash,
+        first_battle_ts: payload.first_battle_ts,
+        last_battle_ts: payload.last_battle_ts,
+        season_id: payload.season_id,
+        schema_version: payload.schema_version,
+        signature_scheme: payload.signature_scheme,
+    }
 }
