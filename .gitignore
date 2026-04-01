@@ -1,0 +1,27 @@
+# Anchor / Solana build artifacts
+.anchor/
+target/
+dist/
+
+# Local validator state
+test-ledger/
+ledger/
+
+# Node / frontend tooling
+node_modules/
+.next/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment and local overrides
+.env
+.env.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+.codex
