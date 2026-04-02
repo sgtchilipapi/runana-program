@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod fixtures;
 mod integration_helpers;
 #[cfg(test)]

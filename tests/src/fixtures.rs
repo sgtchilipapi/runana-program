@@ -7,9 +7,11 @@ use anchor_client::solana_sdk::{
     },
 };
 use runana_program::{
-    ApplyBattleSettlementBatchV1Args, EncounterCountEntry, SettlementBatchPayloadV1,
-    ZoneProgressDeltaEntry,
+    ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, EncounterCountEntry,
+    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs, InitializeZoneEnemySetArgs,
+    InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
@@ -128,12 +130,17 @@ pub struct EncounterCountEntryFixture {
 }
 
 pub fn canonical_fixture_set() -> CanonicalFixtureSet {
+    canonical_fixture_set_with_discriminator(0)
+}
+
+pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> CanonicalFixtureSet {
     let program_id = runana_program::id();
     let authority = canonical_authority_keypair().pubkey();
     let admin_authority = canonical_admin_keypair().pubkey();
     let trusted_server_signer = canonical_server_signer_keypair().pubkey();
     let relayer = canonical_relayer_keypair().pubkey();
-    let character_id = *b"char_fixture_000";
+    let mut character_id = *b"char_fixture_000";
+    character_id[8..16].copy_from_slice(&discriminator.to_le_bytes());
     let character_creation_ts = 1_720_000_000;
     let season_id_at_creation = 1;
     let zone_id: u16 = 7;
@@ -290,6 +297,14 @@ pub fn canonical_fixture_set() -> CanonicalFixtureSet {
         enemy,
         batch,
     }
+}
+
+pub fn unique_integration_fixture_set() -> CanonicalFixtureSet {
+    let discriminator = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos() as u64;
+    canonical_fixture_set_with_discriminator(discriminator)
 }
 
 pub fn genesis_state_hash(character_root_pubkey: Pubkey, character_id: [u8; 16]) -> [u8; 32] {
@@ -456,8 +471,62 @@ pub fn canonical_relayer_keypair() -> Keypair {
 
 pub fn canonical_apply_battle_settlement_batch_v1_args() -> ApplyBattleSettlementBatchV1Args {
     let fixtures = canonical_fixture_set();
+    apply_battle_settlement_batch_v1_args_for_fixture(&fixtures)
+}
+
+pub fn apply_battle_settlement_batch_v1_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> ApplyBattleSettlementBatchV1Args {
     ApplyBattleSettlementBatchV1Args {
         payload: to_program_batch_payload(&fixtures.batch.payload, fixtures.batch.batch_hash),
+    }
+}
+
+pub fn initialize_program_config_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> InitializeProgramConfigArgs {
+    InitializeProgramConfigArgs {
+        trusted_server_signer: fixtures.program.trusted_server_signer,
+        settlement_paused: fixtures.program.settlement_paused,
+        max_battles_per_batch: fixtures.program.max_battles_per_batch,
+        max_histogram_entries_per_batch: fixtures.program.max_histogram_entries_per_batch,
+    }
+}
+
+pub fn initialize_zone_registry_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> InitializeZoneRegistryArgs {
+    InitializeZoneRegistryArgs {
+        zone_id: fixtures.zone.zone_id,
+        exp_multiplier_num: fixtures.zone.exp_multiplier_num,
+        exp_multiplier_den: fixtures.zone.exp_multiplier_den,
+    }
+}
+
+pub fn initialize_zone_enemy_set_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> InitializeZoneEnemySetArgs {
+    InitializeZoneEnemySetArgs {
+        zone_id: fixtures.zone.zone_id,
+        allowed_enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
+    }
+}
+
+pub fn initialize_enemy_archetype_registry_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> InitializeEnemyArchetypeRegistryArgs {
+    InitializeEnemyArchetypeRegistryArgs {
+        enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
+        exp_reward_base: fixtures.enemy.exp_reward_base,
+    }
+}
+
+pub fn create_character_args_for_fixture(fixtures: &CanonicalFixtureSet) -> CreateCharacterArgs {
+    CreateCharacterArgs {
+        character_id: fixtures.character.character_id,
+        character_creation_ts: fixtures.character.character_creation_ts,
+        season_id_at_creation: fixtures.character.season_id_at_creation,
+        initial_unlocked_zone_id: fixtures.zone.zone_id,
     }
 }
 
