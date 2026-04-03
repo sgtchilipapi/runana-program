@@ -12,6 +12,7 @@ use anchor_client::{
         pubkey::Pubkey,
         signature::{read_keypair_file, Signature},
         signer::{keypair::Keypair, Signer},
+        system_instruction,
         transaction::{Transaction, VersionedTransaction},
     },
     Client, ClientError, Cluster, Program,
@@ -33,20 +34,22 @@ pub struct SignedEd25519Message {
 }
 
 pub struct LocalnetRelayerHarness {
-    payer: Rc<Keypair>,
+    relayer: Rc<Keypair>,
     program: Program<Rc<Keypair>>,
 }
 
+const MIN_PLAYER_LAMPORTS: u64 = 50_000_000;
+
 impl LocalnetRelayerHarness {
     pub fn new() -> Result<Self, Box<dyn Error>> {
-        let payer = Rc::new(read_keypair_file(anchor_wallet_path()?)?);
+        let relayer = Rc::new(read_keypair_file(anchor_wallet_path()?)?);
         let client = Client::new_with_options(
             Cluster::Localnet,
-            payer.clone(),
+            relayer.clone(),
             CommitmentConfig::confirmed(),
         );
         let program = client.program(runana_program::id())?;
-        Ok(Self { payer, program })
+        Ok(Self { relayer, program })
     }
 
     pub fn bootstrap_slice1_fixture_state(
@@ -103,15 +106,17 @@ impl LocalnetRelayerHarness {
         let instructions =
             self.build_settlement_request_instructions(fixtures, pre_instructions)?;
         let lookup_table = self.create_lookup_table_for_instructions(&instructions)?;
+        let authority = canonical_authority_keypair();
+        self.ensure_wallet_funded(&authority)?;
         let blockhash = self.program.rpc().get_latest_blockhash()?;
         let message = v0::Message::try_compile(
-            &self.payer.pubkey(),
+            &authority.pubkey(),
             &instructions,
             &[lookup_table],
             blockhash,
         )?;
         let transaction =
-            VersionedTransaction::try_new(VersionedMessage::V0(message), &[self.payer.as_ref()])?;
+            VersionedTransaction::try_new(VersionedMessage::V0(message), &[&authority])?;
 
         Ok(self
             .program
@@ -168,7 +173,7 @@ impl LocalnetRelayerHarness {
         self.program
             .request()
             .accounts(runana_program::accounts::InitializeProgramConfig {
-                payer: self.payer.pubkey(),
+                payer: self.relayer.pubkey(),
                 admin_authority: admin.pubkey(),
                 program_config: fixtures.program.program_config_pubkey,
                 system_program: anchor_client::solana_sdk::system_program::ID,
@@ -196,7 +201,7 @@ impl LocalnetRelayerHarness {
         self.program
             .request()
             .accounts(runana_program::accounts::InitializeZoneRegistry {
-                payer: self.payer.pubkey(),
+                payer: self.relayer.pubkey(),
                 admin_authority: admin.pubkey(),
                 program_config: fixtures.program.program_config_pubkey,
                 zone_registry: fixtures.zone.zone_registry_pubkey,
@@ -225,7 +230,7 @@ impl LocalnetRelayerHarness {
         self.program
             .request()
             .accounts(runana_program::accounts::InitializeZoneEnemySet {
-                payer: self.payer.pubkey(),
+                payer: self.relayer.pubkey(),
                 admin_authority: admin.pubkey(),
                 program_config: fixtures.program.program_config_pubkey,
                 zone_enemy_set: fixtures.zone.zone_enemy_set_pubkey,
@@ -257,7 +262,7 @@ impl LocalnetRelayerHarness {
         self.program
             .request()
             .accounts(runana_program::accounts::InitializeEnemyArchetypeRegistry {
-                payer: self.payer.pubkey(),
+                payer: self.relayer.pubkey(),
                 admin_authority: admin.pubkey(),
                 program_config: fixtures.program.program_config_pubkey,
                 enemy_archetype_registry: fixtures.enemy.enemy_archetype_pubkey,
@@ -285,11 +290,41 @@ impl LocalnetRelayerHarness {
         }
 
         let authority = canonical_authority_keypair();
+        self.submit_create_character_with_signers(fixtures, &authority, &[&authority])?;
+        Ok(())
+    }
+
+    pub fn submit_create_character_with_mismatched_payer(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+    ) -> Result<Signature, Box<dyn Error>> {
+        let authority = canonical_authority_keypair();
+        self.submit_create_character_with_signers(
+            fixtures,
+            self.relayer.as_ref(),
+            &[self.relayer.as_ref(), &authority],
+        )
+    }
+
+    pub fn submit_create_character_with_player_payer(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+    ) -> Result<Signature, Box<dyn Error>> {
+        let authority = canonical_authority_keypair();
+        self.submit_create_character_with_signers(fixtures, &authority, &[&authority])
+    }
+
+    fn build_create_character_instructions(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+        payer: Pubkey,
+        authority: Pubkey,
+    ) -> Result<Vec<Instruction>, ClientError> {
         self.program
             .request()
             .accounts(runana_program::accounts::CreateCharacter {
-                payer: self.payer.pubkey(),
-                authority: authority.pubkey(),
+                payer,
+                authority,
                 character_root: fixtures.character.character_root_pubkey,
                 character_stats: fixtures.character.character_stats_pubkey,
                 character_world_progress: fixtures.character.character_world_progress_pubkey,
@@ -304,9 +339,42 @@ impl LocalnetRelayerHarness {
             .args(runana_program::instruction::CreateCharacter {
                 args: create_character_args_for_fixture(fixtures),
             })
-            .signer(&authority)
-            .send()?;
+            .instructions()
+    }
 
+    fn submit_create_character_with_signers(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+        fee_payer: &Keypair,
+        signers: &[&Keypair],
+    ) -> Result<Signature, Box<dyn Error>> {
+        let authority = canonical_authority_keypair();
+        self.ensure_wallet_funded(fee_payer)?;
+        let instructions = self.build_create_character_instructions(
+            fixtures,
+            fee_payer.pubkey(),
+            authority.pubkey(),
+        )?;
+        self.send_legacy_transaction_with_signers(&instructions, fee_payer, signers)
+    }
+
+    fn ensure_wallet_funded(&self, wallet: &Keypair) -> Result<(), Box<dyn Error>> {
+        if wallet.pubkey() == self.relayer.pubkey() {
+            return Ok(());
+        }
+
+        let current_balance = self.program.rpc().get_balance(&wallet.pubkey())?;
+        if current_balance >= MIN_PLAYER_LAMPORTS {
+            return Ok(());
+        }
+
+        let transfer_lamports = MIN_PLAYER_LAMPORTS - current_balance;
+        let transfer_ix = system_instruction::transfer(
+            &self.relayer.pubkey(),
+            &wallet.pubkey(),
+            transfer_lamports,
+        );
+        self.send_legacy_transaction(&[transfer_ix])?;
         Ok(())
     }
 
@@ -323,16 +391,16 @@ impl LocalnetRelayerHarness {
             .saturating_sub(1);
         let (create_ix, lookup_table_address) =
             address_lookup_table::instruction::create_lookup_table_signed(
-                self.payer.pubkey(),
-                self.payer.pubkey(),
+                self.relayer.pubkey(),
+                self.relayer.pubkey(),
                 recent_slot,
             );
         self.send_legacy_transaction(&[create_ix])?;
 
         let extend_ix = address_lookup_table::instruction::extend_lookup_table(
             lookup_table_address,
-            self.payer.pubkey(),
-            Some(self.payer.pubkey()),
+            self.relayer.pubkey(),
+            Some(self.relayer.pubkey()),
             lookup_addresses,
         );
         self.send_legacy_transaction(&[extend_ix])?;
@@ -356,11 +424,24 @@ impl LocalnetRelayerHarness {
         &self,
         instructions: &[Instruction],
     ) -> Result<Signature, Box<dyn Error>> {
+        self.send_legacy_transaction_with_signers(
+            instructions,
+            self.relayer.as_ref(),
+            &[self.relayer.as_ref()],
+        )
+    }
+
+    fn send_legacy_transaction_with_signers(
+        &self,
+        instructions: &[Instruction],
+        fee_payer: &Keypair,
+        signers: &[&Keypair],
+    ) -> Result<Signature, Box<dyn Error>> {
         let blockhash = self.program.rpc().get_latest_blockhash()?;
         let transaction = Transaction::new_signed_with_payer(
             instructions,
-            Some(&self.payer.pubkey()),
-            &[self.payer.as_ref()],
+            Some(&fee_payer.pubkey()),
+            signers,
             blockhash,
         );
 

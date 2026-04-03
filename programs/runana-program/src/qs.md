@@ -51,11 +51,13 @@ This is a beginner-friendly outline of [lib.rs](/home/paps/projects/runana-progr
 - [`create_character(...)`](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L96)
   Creates and initializes the character’s on-chain state bundle:
   `CharacterRootAccount`, stats, world progress, zone progress page, and settlement cursor.
+  This instruction now enforces the player-funded rule by requiring `payer == authority`.
 
 ### 4.6 `apply_battle_settlement_batch_v1`
 
 - [`apply_battle_settlement_batch_v1(...)`](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L153)
   The Slice 1 settlement instruction. It validates the settlement batch and then applies EXP and cursor updates.
+  It does not inspect the transaction fee payer; settlement authorization still comes from the trusted server attestation plus the player permit.
 
 ## 5. Accounts Context Structs
 
@@ -85,11 +87,13 @@ These are Anchor `#[derive(Accounts)]` structs. They describe which accounts an 
 
 - [`CreateCharacter`](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L292)
   Accounts needed to create the initial character state bundle.
+  The `payer` signer must be the same wallet as `authority`.
 
 ### 5.6 `ApplyBattleSettlementBatchV1`
 
 - [`ApplyBattleSettlementBatchV1`](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L344)
   Accounts needed to validate and apply a settlement batch.
+  No payer account is part of this instruction; the transaction fee payer remains a client-side concern.
 
 ## 6. On-Chain State Account Structs
 

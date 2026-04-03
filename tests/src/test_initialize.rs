@@ -4,6 +4,30 @@ use crate::{
 };
 
 #[test]
+fn test_create_character_requires_player_as_payer() {
+    let fixtures = unique_integration_fixture_set();
+    let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+
+    let tx = harness
+        .submit_create_character_with_player_payer(&fixtures)
+        .expect("player-funded character creation should succeed");
+
+    harness
+        .assert_signature_confirmed(&tx)
+        .expect("player-funded character creation should be confirmed");
+
+    let err = harness
+        .submit_create_character_with_mismatched_payer(&unique_integration_fixture_set())
+        .expect_err("non-player-funded character creation should fail");
+
+    assert!(
+        err.to_string()
+            .contains("Player-owned account creation must be funded by the player authority"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn test_apply_battle_settlement_batch_v1_happy_path() {
     let fixtures = unique_integration_fixture_set();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");

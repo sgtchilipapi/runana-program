@@ -290,7 +290,10 @@ pub struct InitializeEnemyArchetypeRegistry<'info> {
 #[derive(Accounts)]
 #[instruction(args: CreateCharacterArgs)]
 pub struct CreateCharacter<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = payer.key() == authority.key() @ SettlementError::PlayerMustSelfFund
+    )]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
     #[account(
@@ -1177,6 +1180,8 @@ pub enum SettlementError {
     InvalidBatchSequence,
     #[msg("The payload start_state_hash does not match the cursor")]
     StartStateHashMismatch,
+    #[msg("Player-owned account creation must be funded by the player authority")]
+    PlayerMustSelfFund,
     #[msg("The program config PDA does not match the canonical seed")]
     InvalidProgramConfigPda,
     #[msg("The character root PDA does not match the canonical seed")]
