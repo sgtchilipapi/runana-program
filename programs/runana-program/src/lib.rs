@@ -3,6 +3,7 @@ use anchor_lang::{
     solana_program::sysvar::instructions::{
         load_current_index_checked, load_instruction_at_checked,
     },
+    AccountsExit,
 };
 use solana_program::{ed25519_program, hash::hashv};
 
@@ -173,12 +174,33 @@ pub mod runana_program {
         Ok(())
     }
 
-    pub fn apply_battle_settlement_batch_v1(
-        ctx: Context<ApplyBattleSettlementBatchV1>,
+    pub fn initialize_character_zone_progress_page(
+        ctx: Context<InitializeCharacterZoneProgressPage>,
+        args: InitializeCharacterZoneProgressPageArgs,
+    ) -> Result<()> {
+        let character_zone_progress_page = &mut ctx.accounts.character_zone_progress_page;
+        character_zone_progress_page.version = ACCOUNT_VERSION_V1;
+        character_zone_progress_page.bump = ctx.bumps.character_zone_progress_page;
+        character_zone_progress_page.character_root = ctx.accounts.character_root.key();
+        character_zone_progress_page.page_index = args.page_index;
+        character_zone_progress_page.zone_states = [0_u8; ZONE_PAGE_WIDTH as usize];
+
+        Ok(())
+    }
+
+    pub fn apply_battle_settlement_batch_v1<'info>(
+        ctx: Context<'_, '_, 'info, 'info, ApplyBattleSettlementBatchV1<'info>>,
         args: ApplyBattleSettlementBatchV1Args,
     ) -> Result<()> {
+        let mut additional_zone_progress_pages = load_additional_zone_progress_pages(&ctx)?;
+
         verify_canonical_account_addresses(&ctx)?;
-        verify_character_binding(&ctx, &args.payload)?;
+        verify_character_binding(&ctx, &args.payload, &additional_zone_progress_pages)?;
+        verify_zone_progress_account_envelope(
+            &ctx,
+            &args.payload,
+            &additional_zone_progress_pages,
+        )?;
         verify_program_controls(&ctx.accounts.program_config)?;
         verify_batch_policy_limits(&ctx.accounts.program_config, &args.payload)?;
         verify_nonce_range(&args.payload)?;
@@ -195,7 +217,17 @@ pub mod runana_program {
             &ctx.accounts.season_policy,
             &args.payload,
         )?;
-        verify_world_eligibility(&args.payload, &ctx.accounts.character_zone_progress_page)?;
+        verify_zone_progress_delta(
+            &args.payload,
+            &ctx.accounts.character_world_progress,
+            &ctx.accounts.character_zone_progress_page,
+            &additional_zone_progress_pages,
+        )?;
+        verify_world_eligibility(
+            &args.payload,
+            &ctx.accounts.character_zone_progress_page,
+            &additional_zone_progress_pages,
+        )?;
         verify_zone_enemy_legality(
             &args.payload,
             &ctx.accounts.zone_registry,
@@ -212,8 +244,10 @@ pub mod runana_program {
         apply_zone_progress_delta(
             &args.payload,
             &mut ctx.accounts.character_zone_progress_page,
+            &mut additional_zone_progress_pages,
             &mut ctx.accounts.character_world_progress,
         )?;
+        persist_additional_zone_progress_pages(additional_zone_progress_pages, ctx.program_id)?;
 
         let character_stats = &mut ctx.accounts.character_stats;
         character_stats.total_exp = character_stats
@@ -401,6 +435,36 @@ pub struct CreateCharacter<'info> {
         space = CharacterSettlementBatchCursorAccount::LEN,
     )]
     pub character_settlement_batch_cursor: Account<'info, CharacterSettlementBatchCursorAccount>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: InitializeCharacterZoneProgressPageArgs)]
+pub struct InitializeCharacterZoneProgressPage<'info> {
+    #[account(
+        mut,
+        constraint = payer.key() == authority.key() @ SettlementError::PlayerMustSelfFund
+    )]
+    pub payer: Signer<'info>,
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [CHARACTER_SEED, authority.key().as_ref(), &character_root.character_id],
+        bump = character_root.bump,
+        constraint = character_root.authority == authority.key() @ SettlementError::PlayerAuthorityMismatch,
+    )]
+    pub character_root: Account<'info, CharacterRootAccount>,
+    #[account(
+        init,
+        payer = payer,
+        seeds = [
+            CHARACTER_ZONE_PROGRESS_SEED,
+            character_root.key().as_ref(),
+            &args.page_index.to_le_bytes(),
+        ],
+        bump,
+        space = CharacterZoneProgressPageAccount::LEN,
+    )]
+    pub character_zone_progress_page: Account<'info, CharacterZoneProgressPageAccount>,
     pub system_program: Program<'info, System>,
 }
 
@@ -605,6 +669,11 @@ pub struct CreateCharacterArgs {
     pub character_creation_ts: u64,
     pub season_id_at_creation: u32,
     pub initial_unlocked_zone_id: u16,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InitializeCharacterZoneProgressPageArgs {
+    pub page_index: u16,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -854,6 +923,7 @@ fn verify_batch_policy_limits(
 fn verify_character_binding(
     ctx: &Context<ApplyBattleSettlementBatchV1>,
     payload: &SettlementBatchPayloadV1,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
 ) -> Result<()> {
     let character_root = &ctx.accounts.character_root;
 
@@ -888,6 +958,193 @@ fn verify_character_binding(
         character_root.key(),
         SettlementError::CharacterAccountBindingMismatch
     );
+    for page in additional_zone_progress_pages {
+        require_keys_eq!(
+            page.data.character_root,
+            character_root.key(),
+            SettlementError::CharacterAccountBindingMismatch
+        );
+    }
+
+    Ok(())
+}
+
+fn load_additional_zone_progress_pages<'info>(
+    ctx: &Context<'_, '_, 'info, 'info, ApplyBattleSettlementBatchV1<'info>>,
+) -> Result<Vec<LoadedZoneProgressPage<'info>>> {
+    let mut pages = Vec::with_capacity(ctx.remaining_accounts.len());
+    for account_info in ctx.remaining_accounts.iter() {
+        let account = Account::<CharacterZoneProgressPageAccount>::try_from(account_info)?;
+        pages.push(LoadedZoneProgressPage {
+            info: account_info.clone(),
+            data: account.into_inner(),
+        });
+    }
+    Ok(pages)
+}
+
+fn verify_zone_progress_account_envelope(
+    ctx: &Context<ApplyBattleSettlementBatchV1>,
+    payload: &SettlementBatchPayloadV1,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<()> {
+    let referenced_page_indices = referenced_zone_page_indices(payload);
+    require!(
+        !referenced_page_indices.is_empty(),
+        SettlementError::MissingZoneProgressPageAccount
+    );
+    require!(
+        referenced_page_indices[0] == ctx.accounts.character_zone_progress_page.page_index,
+        SettlementError::ZoneProgressPageAccountOrderMismatch
+    );
+    require!(
+        referenced_page_indices.len() == additional_zone_progress_pages.len() + 1,
+        SettlementError::MissingZoneProgressPageAccount
+    );
+
+    verify_zone_progress_page_account(
+        ctx.program_id,
+        &ctx.accounts.character_root.key(),
+        &ctx.accounts.character_zone_progress_page.to_account_info(),
+        &ctx.accounts.character_zone_progress_page,
+        referenced_page_indices[0],
+    )?;
+
+    for (page, expected_page_index) in additional_zone_progress_pages
+        .iter()
+        .zip(referenced_page_indices.iter().copied().skip(1))
+    {
+        verify_zone_progress_page_account(
+            ctx.program_id,
+            &ctx.accounts.character_root.key(),
+            &page.info,
+            &page.data,
+            expected_page_index,
+        )?;
+    }
+
+    verify_world_progress_summary_consistency(
+        &ctx.accounts.character_world_progress,
+        &ctx.accounts.character_zone_progress_page,
+        additional_zone_progress_pages,
+    )?;
+
+    Ok(())
+}
+
+fn verify_zone_progress_page_account(
+    program_id: &Pubkey,
+    character_root_key: &Pubkey,
+    account_info: &AccountInfo,
+    page: &CharacterZoneProgressPageAccount,
+    expected_page_index: u16,
+) -> Result<()> {
+    require!(
+        account_info.is_writable,
+        SettlementError::ZoneProgressPageMustBeWritable
+    );
+    require!(
+        page.page_index == expected_page_index,
+        SettlementError::ZoneProgressPageAccountOrderMismatch
+    );
+
+    let (expected_zone_progress_page, _) = Pubkey::find_program_address(
+        &[
+            CHARACTER_ZONE_PROGRESS_SEED,
+            character_root_key.as_ref(),
+            &expected_page_index.to_le_bytes(),
+        ],
+        program_id,
+    );
+    require_keys_eq!(
+        account_info.key(),
+        expected_zone_progress_page,
+        SettlementError::InvalidZoneProgressPagePda
+    );
+
+    Ok(())
+}
+
+fn referenced_zone_page_indices(payload: &SettlementBatchPayloadV1) -> Vec<u16> {
+    let mut page_indices = Vec::new();
+
+    for entry in &payload.encounter_histogram {
+        push_unique_page_index(&mut page_indices, entry.zone_id / ZONE_PAGE_WIDTH);
+    }
+    for entry in &payload.zone_progress_delta {
+        push_unique_page_index(&mut page_indices, entry.zone_id / ZONE_PAGE_WIDTH);
+    }
+
+    page_indices.sort_unstable();
+    page_indices
+}
+
+fn push_unique_page_index(page_indices: &mut Vec<u16>, page_index: u16) {
+    if !page_indices.contains(&page_index) {
+        page_indices.push(page_index);
+    }
+}
+
+fn verify_world_progress_summary_consistency(
+    character_world_progress: &CharacterWorldProgressAccount,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<()> {
+    require!(
+        character_world_progress.highest_cleared_zone_id
+            <= character_world_progress.highest_unlocked_zone_id,
+        SettlementError::SummaryPageInconsistency
+    );
+
+    let mut highest_unlocked_from_pages = 0_u16;
+    let mut highest_cleared_from_pages = 0_u16;
+
+    accumulate_page_summary_bounds(
+        primary_zone_progress_page,
+        &mut highest_unlocked_from_pages,
+        &mut highest_cleared_from_pages,
+    )?;
+    for page in additional_zone_progress_pages {
+        accumulate_page_summary_bounds(
+            &page.data,
+            &mut highest_unlocked_from_pages,
+            &mut highest_cleared_from_pages,
+        )?;
+    }
+
+    require!(
+        character_world_progress.highest_unlocked_zone_id >= highest_unlocked_from_pages
+            && character_world_progress.highest_cleared_zone_id >= highest_cleared_from_pages,
+        SettlementError::SummaryPageInconsistency
+    );
+
+    Ok(())
+}
+
+fn accumulate_page_summary_bounds(
+    page: &CharacterZoneProgressPageAccount,
+    highest_unlocked_from_pages: &mut u16,
+    highest_cleared_from_pages: &mut u16,
+) -> Result<()> {
+    for (offset, state) in page.zone_states.iter().copied().enumerate() {
+        require!(
+            state <= ZONE_STATE_CLEARED,
+            SettlementError::InvalidZoneProgressState
+        );
+
+        let zone_id = page
+            .page_index
+            .checked_mul(ZONE_PAGE_WIDTH)
+            .and_then(|page_start| page_start.checked_add(offset as u16))
+            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+
+        if state >= ZONE_STATE_UNLOCKED {
+            *highest_unlocked_from_pages = (*highest_unlocked_from_pages).max(zone_id);
+        }
+        if state >= ZONE_STATE_CLEARED {
+            *highest_cleared_from_pages = (*highest_cleared_from_pages).max(zone_id);
+        }
+    }
 
     Ok(())
 }
@@ -969,6 +1226,11 @@ fn verify_ed25519_preinstructions(
 struct ParsedEd25519InstructionPayload<'a> {
     signer_pubkey: &'a [u8],
     message: &'a [u8],
+}
+
+struct LoadedZoneProgressPage<'info> {
+    info: AccountInfo<'info>,
+    data: CharacterZoneProgressPageAccount,
 }
 
 fn parse_ed25519_instruction_payload(data: &[u8]) -> Result<ParsedEd25519InstructionPayload<'_>> {
@@ -1093,11 +1355,16 @@ fn verify_histogram_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> 
 
 fn verify_world_eligibility(
     payload: &SettlementBatchPayloadV1,
-    character_zone_progress_page: &CharacterZoneProgressPageAccount,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
 ) -> Result<()> {
     for entry in &payload.encounter_histogram {
-        let effective_zone_state =
-            effective_zone_state_after_batch(entry.zone_id, payload, character_zone_progress_page)?;
+        let effective_zone_state = effective_zone_state_after_batch(
+            entry.zone_id,
+            payload,
+            primary_zone_progress_page,
+            additional_zone_progress_pages,
+        )?;
         require!(
             effective_zone_state >= ZONE_STATE_UNLOCKED,
             SettlementError::IllegalLockedZoneReference
@@ -1110,16 +1377,14 @@ fn verify_world_eligibility(
 fn effective_zone_state_after_batch(
     zone_id: u16,
     payload: &SettlementBatchPayloadV1,
-    character_zone_progress_page: &CharacterZoneProgressPageAccount,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
 ) -> Result<u8> {
-    let expected_page_index = zone_id / ZONE_PAGE_WIDTH;
-    require!(
-        expected_page_index == character_zone_progress_page.page_index,
-        SettlementError::InvalidZoneProgressPage
-    );
-
-    let zone_offset = (zone_id % ZONE_PAGE_WIDTH) as usize;
-    let mut effective_state = character_zone_progress_page.zone_states[zone_offset];
+    let mut effective_state = zone_state(
+        zone_id,
+        primary_zone_progress_page,
+        additional_zone_progress_pages,
+    )?;
 
     for delta in &payload.zone_progress_delta {
         if delta.zone_id == zone_id && delta.new_state > effective_state {
@@ -1128,6 +1393,78 @@ fn effective_zone_state_after_batch(
     }
 
     Ok(effective_state)
+}
+
+fn verify_zone_progress_delta(
+    payload: &SettlementBatchPayloadV1,
+    character_world_progress: &CharacterWorldProgressAccount,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<()> {
+    let mut seen_zone_ids = Vec::new();
+
+    for entry in &payload.zone_progress_delta {
+        require!(
+            !seen_zone_ids.contains(&entry.zone_id),
+            SettlementError::DuplicateZoneProgressDelta
+        );
+        seen_zone_ids.push(entry.zone_id);
+
+        require!(
+            entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED,
+            SettlementError::InvalidZoneProgressDelta
+        );
+
+        let prior_state = zone_state(
+            entry.zone_id,
+            primary_zone_progress_page,
+            additional_zone_progress_pages,
+        )?;
+        require!(
+            entry.new_state >= prior_state,
+            SettlementError::InvalidZoneProgressDelta
+        );
+
+        let is_allowed_transition = match prior_state {
+            0 => entry.new_state == ZONE_STATE_UNLOCKED,
+            ZONE_STATE_UNLOCKED => {
+                entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED
+            }
+            ZONE_STATE_CLEARED => entry.new_state == ZONE_STATE_CLEARED,
+            _ => false,
+        };
+        require!(
+            is_allowed_transition,
+            SettlementError::InvalidZoneProgressDelta
+        );
+    }
+
+    verify_world_progress_summary_consistency(
+        character_world_progress,
+        primary_zone_progress_page,
+        additional_zone_progress_pages,
+    )?;
+
+    Ok(())
+}
+
+fn zone_state(
+    zone_id: u16,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<u8> {
+    let expected_page_index = zone_id / ZONE_PAGE_WIDTH;
+
+    if primary_zone_progress_page.page_index == expected_page_index {
+        return Ok(primary_zone_progress_page.zone_states[(zone_id % ZONE_PAGE_WIDTH) as usize]);
+    }
+
+    let page = additional_zone_progress_pages
+        .iter()
+        .find(|page| page.data.page_index == expected_page_index)
+        .ok_or_else(|| error!(SettlementError::MissingZoneProgressPageAccount))?;
+
+    Ok(page.data.zone_states[(zone_id % ZONE_PAGE_WIDTH) as usize])
 }
 
 fn verify_zone_enemy_legality(
@@ -1310,20 +1647,27 @@ fn derive_exp_delta(
 
 fn apply_zone_progress_delta(
     payload: &SettlementBatchPayloadV1,
-    character_zone_progress_page: &mut CharacterZoneProgressPageAccount,
+    primary_zone_progress_page: &mut CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &mut [LoadedZoneProgressPage],
     character_world_progress: &mut CharacterWorldProgressAccount,
 ) -> Result<()> {
     for entry in &payload.zone_progress_delta {
-        let expected_page_index = entry.zone_id / ZONE_PAGE_WIDTH;
-        require!(
-            expected_page_index == character_zone_progress_page.page_index,
-            SettlementError::InvalidZoneProgressPage
-        );
-
         let zone_offset = (entry.zone_id % ZONE_PAGE_WIDTH) as usize;
-        let prior_state = character_zone_progress_page.zone_states[zone_offset];
-        if entry.new_state > prior_state {
-            character_zone_progress_page.zone_states[zone_offset] = entry.new_state;
+        let page_index = entry.zone_id / ZONE_PAGE_WIDTH;
+        if primary_zone_progress_page.page_index == page_index {
+            let prior_state = primary_zone_progress_page.zone_states[zone_offset];
+            if entry.new_state > prior_state {
+                primary_zone_progress_page.zone_states[zone_offset] = entry.new_state;
+            }
+        } else {
+            let zone_page = additional_zone_progress_pages
+                .iter_mut()
+                .find(|page| page.data.page_index == page_index)
+                .ok_or_else(|| error!(SettlementError::MissingZoneProgressPageAccount))?;
+            let prior_state = zone_page.data.zone_states[zone_offset];
+            if entry.new_state > prior_state {
+                zone_page.data.zone_states[zone_offset] = entry.new_state;
+            }
         }
 
         if entry.new_state >= ZONE_STATE_UNLOCKED {
@@ -1335,6 +1679,22 @@ fn apply_zone_progress_delta(
             character_world_progress.highest_cleared_zone_id = character_world_progress
                 .highest_cleared_zone_id
                 .max(entry.zone_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_additional_zone_progress_pages<'info>(
+    additional_zone_progress_pages: Vec<LoadedZoneProgressPage<'info>>,
+    program_id: &Pubkey,
+) -> Result<()> {
+    for page in additional_zone_progress_pages {
+        if page.info.owner == program_id && !anchor_lang::__private::is_closed(&page.info) {
+            let mut data = page.info.try_borrow_mut_data()?;
+            let dst: &mut [u8] = &mut data;
+            let mut writer = anchor_lang::__private::BpfWriter::new(dst);
+            page.data.try_serialize(&mut writer)?;
         }
     }
 
@@ -1487,6 +1847,20 @@ pub enum SettlementError {
     InvalidZoneProgressPagePda,
     #[msg("Zone progression updates require the matching page account")]
     InvalidZoneProgressPage,
+    #[msg("The settlement batch is missing a required zone progress page account")]
+    MissingZoneProgressPageAccount,
+    #[msg("Zone progress page accounts must be supplied in canonical ascending page order")]
+    ZoneProgressPageAccountOrderMismatch,
+    #[msg("Zone progress page accounts used by settlement must be writable")]
+    ZoneProgressPageMustBeWritable,
+    #[msg("Zone progress delta entries violate the canonical monotonic transition rules")]
+    InvalidZoneProgressDelta,
+    #[msg("Duplicate zone progress delta entries are forbidden")]
+    DuplicateZoneProgressDelta,
+    #[msg("Summary and zone page progression state are inconsistent")]
+    SummaryPageInconsistency,
+    #[msg("Zone progress page state contains an invalid value")]
+    InvalidZoneProgressState,
     #[msg("The zone configuration is invalid")]
     InvalidZoneConfig,
     #[msg("The season policy configuration is invalid")]

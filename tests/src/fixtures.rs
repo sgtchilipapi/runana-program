@@ -8,9 +8,9 @@ use anchor_client::solana_sdk::{
 };
 use runana_program::{
     ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, EncounterCountEntry,
-    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs, InitializeSeasonPolicyArgs,
-    InitializeZoneEnemySetArgs, InitializeZoneRegistryArgs, SettlementBatchPayloadV1,
-    ZoneProgressDeltaEntry,
+    InitializeCharacterZoneProgressPageArgs, InitializeEnemyArchetypeRegistryArgs,
+    InitializeProgramConfigArgs, InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs,
+    InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,8 @@ pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
 pub const SCHEMA_VERSION_CANONICAL_V2: u16 = 2;
 pub const ZONE_STATE_UNLOCKED: u8 = 1;
+pub const ZONE_STATE_CLEARED: u8 = 2;
+pub const CHARACTER_ZONE_PROGRESS_SEED: &[u8] = b"character_zone_progress";
 pub const CHARACTER_BATCH_CURSOR_SEED: &[u8] = b"character_batch_cursor";
 pub const SEASON_POLICY_SEED: &[u8] = b"season_policy";
 pub const CANONICAL_AUTHORITY_SEED: [u8; 32] = [7; 32];
@@ -564,6 +566,12 @@ pub fn create_character_args_for_fixture(fixtures: &CanonicalFixtureSet) -> Crea
         season_id_at_creation: fixtures.character.season_id_at_creation,
         initial_unlocked_zone_id: fixtures.zone.zone_id,
     }
+}
+
+pub fn initialize_character_zone_progress_page_args(
+    page_index: u16,
+) -> InitializeCharacterZoneProgressPageArgs {
+    InitializeCharacterZoneProgressPageArgs { page_index }
 }
 
 pub fn to_program_batch_payload(

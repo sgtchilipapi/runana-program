@@ -7,7 +7,7 @@ use anchor_client::{
         account::Account,
         address_lookup_table::{self, AddressLookupTableAccount},
         commitment_config::CommitmentConfig,
-        instruction::Instruction,
+        instruction::{AccountMeta, Instruction},
         message::{v0, VersionedMessage},
         pubkey::Pubkey,
         signature::{read_keypair_file, Signature},
@@ -21,10 +21,11 @@ use anchor_client::{
 use crate::fixtures::{
     apply_battle_settlement_batch_v1_args_for_fixture, canonical_admin_keypair,
     canonical_authority_keypair, canonical_server_signer_keypair,
-    create_character_args_for_fixture, initialize_enemy_archetype_registry_args_for_fixture,
+    create_character_args_for_fixture, initialize_character_zone_progress_page_args,
+    initialize_enemy_archetype_registry_args_for_fixture,
     initialize_program_config_args_for_fixture, initialize_season_policy_args_for_fixture,
     initialize_zone_enemy_set_args_for_fixture, initialize_zone_registry_args_for_fixture,
-    CanonicalFixtureSet,
+    CanonicalFixtureSet, CHARACTER_ZONE_PROGRESS_SEED,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,11 +72,12 @@ impl LocalnetRelayerHarness {
         fixtures: &CanonicalFixtureSet,
         pre_instructions: &[Instruction],
     ) -> Result<Vec<Instruction>, ClientError> {
-        self.build_settlement_request_instructions_with_accounts_and_args(
+        self.build_settlement_request_instructions_with_accounts_args_and_extra_pages(
             fixtures,
             fixtures.character.authority,
             apply_battle_settlement_batch_v1_args_for_fixture(fixtures),
             pre_instructions,
+            &[],
         )
     }
 
@@ -86,12 +88,29 @@ impl LocalnetRelayerHarness {
         args: runana_program::ApplyBattleSettlementBatchV1Args,
         pre_instructions: &[Instruction],
     ) -> Result<Vec<Instruction>, ClientError> {
+        self.build_settlement_request_instructions_with_accounts_args_and_extra_pages(
+            fixtures,
+            player_authority,
+            args,
+            pre_instructions,
+            &[],
+        )
+    }
+
+    pub fn build_settlement_request_instructions_with_accounts_args_and_extra_pages(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+        player_authority: Pubkey,
+        args: runana_program::ApplyBattleSettlementBatchV1Args,
+        pre_instructions: &[Instruction],
+        extra_zone_progress_pages: &[Pubkey],
+    ) -> Result<Vec<Instruction>, ClientError> {
         let mut request = self.program.request();
         for ix in pre_instructions.iter().cloned() {
             request = request.instruction(ix);
         }
 
-        request
+        let mut instructions = request
             .accounts(runana_program::accounts::ApplyBattleSettlementBatchV1 {
                 player_authority,
                 instructions_sysvar: anchor_client::solana_sdk::sysvar::instructions::ID,
@@ -111,7 +130,15 @@ impl LocalnetRelayerHarness {
                     .character_settlement_batch_cursor_pubkey,
             })
             .args(runana_program::instruction::ApplyBattleSettlementBatchV1 { args })
-            .instructions()
+            .instructions()?;
+
+        if let Some(settlement_ix) = instructions.last_mut() {
+            for page in extra_zone_progress_pages {
+                settlement_ix.accounts.push(AccountMeta::new(*page, false));
+            }
+        }
+
+        Ok(instructions)
     }
 
     pub fn submit_settlement_with_pre_instructions(
@@ -121,6 +148,24 @@ impl LocalnetRelayerHarness {
     ) -> Result<Signature, Box<dyn Error>> {
         let instructions =
             self.build_settlement_request_instructions(fixtures, pre_instructions)?;
+        let authority = canonical_authority_keypair();
+        self.submit_versioned_transaction_with_signers(&instructions, &authority, &[&authority])
+    }
+
+    pub fn submit_settlement_with_pre_instructions_and_extra_pages(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+        pre_instructions: &[Instruction],
+        extra_zone_progress_pages: &[Pubkey],
+    ) -> Result<Signature, Box<dyn Error>> {
+        let instructions = self
+            .build_settlement_request_instructions_with_accounts_args_and_extra_pages(
+                fixtures,
+                fixtures.character.authority,
+                apply_battle_settlement_batch_v1_args_for_fixture(fixtures),
+                pre_instructions,
+                extra_zone_progress_pages,
+            )?;
         let authority = canonical_authority_keypair();
         self.submit_versioned_transaction_with_signers(&instructions, &authority, &[&authority])
     }
@@ -345,6 +390,54 @@ impl LocalnetRelayerHarness {
         let authority = canonical_authority_keypair();
         self.submit_create_character_with_signers(fixtures, &authority, &[&authority])?;
         Ok(())
+    }
+
+    pub fn ensure_character_zone_progress_page(
+        &self,
+        character_root_pubkey: Pubkey,
+        authority: &Keypair,
+        page_index: u16,
+    ) -> Result<Pubkey, Box<dyn Error>> {
+        let (character_zone_progress_page_pubkey, _) = Pubkey::find_program_address(
+            &[
+                CHARACTER_ZONE_PROGRESS_SEED,
+                character_root_pubkey.as_ref(),
+                &page_index.to_le_bytes(),
+            ],
+            &runana_program::id(),
+        );
+
+        if self
+            .fetch_anchor_account::<runana_program::CharacterZoneProgressPageAccount>(
+                character_zone_progress_page_pubkey,
+            )?
+            .is_some()
+        {
+            return Ok(character_zone_progress_page_pubkey);
+        }
+
+        self.ensure_wallet_funded(authority)?;
+        let instructions = self
+            .program
+            .request()
+            .accounts(
+                runana_program::accounts::InitializeCharacterZoneProgressPage {
+                    payer: authority.pubkey(),
+                    authority: authority.pubkey(),
+                    character_root: character_root_pubkey,
+                    character_zone_progress_page: character_zone_progress_page_pubkey,
+                    system_program: anchor_client::solana_sdk::system_program::ID,
+                },
+            )
+            .args(
+                runana_program::instruction::InitializeCharacterZoneProgressPage {
+                    args: initialize_character_zone_progress_page_args(page_index),
+                },
+            )
+            .instructions()?;
+
+        self.send_legacy_transaction_with_signers(&instructions, authority, &[authority])?;
+        Ok(character_zone_progress_page_pubkey)
     }
 
     pub fn submit_create_character_with_mismatched_payer(
