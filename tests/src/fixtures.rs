@@ -90,6 +90,7 @@ pub struct CanonicalZoneFixture {
     pub page_index_u16: u16,
     pub zone_registry_pubkey: Pubkey,
     pub zone_enemy_set_pubkey: Pubkey,
+    pub allowed_enemy_archetype_ids: Vec<u16>,
     pub starting_state: u8,
     pub exp_multiplier_num: u16,
     pub exp_multiplier_den: u16,
@@ -237,6 +238,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         page_index_u16,
         zone_registry_pubkey,
         zone_enemy_set_pubkey,
+        allowed_enemy_archetype_ids: vec![enemy_archetype_id],
         starting_state: ZONE_STATE_UNLOCKED,
         exp_multiplier_num: 125,
         exp_multiplier_den: 100,
@@ -535,7 +537,7 @@ pub fn initialize_zone_enemy_set_args_for_fixture(
 ) -> InitializeZoneEnemySetArgs {
     InitializeZoneEnemySetArgs {
         zone_id: fixtures.zone.zone_id,
-        allowed_enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
+        allowed_enemy_archetype_ids: fixtures.zone.allowed_enemy_archetype_ids.clone(),
     }
 }
 

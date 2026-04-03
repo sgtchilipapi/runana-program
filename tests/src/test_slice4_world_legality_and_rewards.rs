@@ -101,6 +101,7 @@ fn with_registry_context(
     next.zone.page_index_u16 = page_index_u16;
     next.zone.zone_registry_pubkey = zone_registry_pubkey;
     next.zone.zone_enemy_set_pubkey = zone_enemy_set_pubkey;
+    next.zone.allowed_enemy_archetype_ids = vec![enemy_archetype_id];
     next.zone.exp_multiplier_num = exp_multiplier_num;
     next.zone.exp_multiplier_den = exp_multiplier_den;
 

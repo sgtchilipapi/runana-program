@@ -83,6 +83,7 @@ fn with_registry_context(
     next.zone.page_index_u16 = zone_id / 256;
     next.zone.zone_registry_pubkey = zone_registry_pubkey;
     next.zone.zone_enemy_set_pubkey = zone_enemy_set_pubkey;
+    next.zone.allowed_enemy_archetype_ids = vec![enemy_archetype_id];
     next.zone.exp_multiplier_num = exp_multiplier_num;
     next.zone.exp_multiplier_den = exp_multiplier_den;
 
@@ -192,8 +193,17 @@ fn test_apply_battle_settlement_batch_v1_rejects_missing_secondary_zone_progress
         .expect("alternate registry fixture state should bootstrap");
 
     let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let mut instructions = harness
+        .build_settlement_request_instructions(&fixtures, &pre_instructions)
+        .expect("settlement instructions should build");
+    let settlement_ix = instructions
+        .last_mut()
+        .expect("settlement instruction should be present");
+    settlement_ix.accounts.truncate(9);
+
+    let authority = canonical_authority_keypair();
     let err = harness
-        .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
+        .submit_versioned_transaction_with_signers(&instructions, &authority, &[&authority])
         .expect_err("missing secondary page account should fail");
 
     assert_err_contains(

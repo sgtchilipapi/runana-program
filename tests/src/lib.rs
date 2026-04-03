@@ -16,3 +16,5 @@ mod test_slice3_time_season_and_throughput;
 mod test_slice4_world_legality_and_rewards;
 #[cfg(test)]
 mod test_slice5_progression_and_envelope;
+#[cfg(test)]
+mod test_slice6_mixed_registry_batching;
