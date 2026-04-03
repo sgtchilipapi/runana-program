@@ -12,7 +12,7 @@ use runana_program::{
     InitializeProgramConfigArgs, InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs,
     InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
@@ -27,6 +27,8 @@ pub const CANONICAL_ADMIN_SEED: [u8; 32] = [8; 32];
 pub const CANONICAL_SERVER_SIGNER_SEED: [u8; 32] = [9; 32];
 pub const CANONICAL_RELAYER_SEED: [u8; 32] = [10; 32];
 pub const CANONICAL_ALT_AUTHORITY_SEED: [u8; 32] = [11; 32];
+
+static UNIQUE_FIXTURE_DISCRIMINATOR: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalFixtureSet {
@@ -159,8 +161,17 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     character_id[8..16].copy_from_slice(&discriminator.to_le_bytes());
     let character_creation_ts = 1_720_000_000;
     let season_id_at_creation = 1_u32.saturating_add((discriminator as u32) & 0x3fff_ffff);
-    let zone_id: u16 = 7;
-    let enemy_archetype_id: u16 = 42;
+    let unique_registry_offset = discriminator.saturating_sub(1) as u16;
+    let zone_id: u16 = if discriminator == 0 {
+        7
+    } else {
+        7_u16.saturating_add(unique_registry_offset % 120)
+    };
+    let enemy_archetype_id: u16 = if discriminator == 0 {
+        42
+    } else {
+        1_042_u16.saturating_add(unique_registry_offset)
+    };
     let page_index_u16: u16 = zone_id / 256;
 
     let (program_config_pubkey, _) =
@@ -330,10 +341,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
 }
 
 pub fn unique_integration_fixture_set() -> CanonicalFixtureSet {
-    let discriminator = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos() as u64;
+    let discriminator = UNIQUE_FIXTURE_DISCRIMINATOR.fetch_add(1, Ordering::Relaxed);
     canonical_fixture_set_with_discriminator(discriminator)
 }
 

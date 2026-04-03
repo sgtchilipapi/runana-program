@@ -166,15 +166,23 @@ fn test_apply_battle_settlement_batch_v1_rejects_illegal_locked_zone_reference()
 #[test]
 fn test_apply_battle_settlement_batch_v1_rejects_illegal_zone_enemy_pair() {
     let base = unique_integration_fixture_set();
+    let illegal_enemy_archetype_id = base.enemy.enemy_archetype_id + 1;
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&base)
         .expect("fixture state should bootstrap");
+    harness
+        .ensure_enemy_archetype_registry_entry(
+            base.program.program_config_pubkey,
+            illegal_enemy_archetype_id,
+            base.enemy.exp_reward_base + 1,
+        )
+        .expect("alternate enemy registry should bootstrap");
 
     let fixtures = with_payload(&base, |payload| {
         payload.encounter_histogram = vec![EncounterCountEntryFixture {
             zone_id: base.zone.zone_id,
-            enemy_archetype_id: base.enemy.enemy_archetype_id + 1,
+            enemy_archetype_id: illegal_enemy_archetype_id,
             count: payload.battle_count,
         }];
     });
