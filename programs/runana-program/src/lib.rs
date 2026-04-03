@@ -180,8 +180,9 @@ pub mod runana_program {
         verify_canonical_account_addresses(&ctx)?;
         verify_character_binding(&ctx, &args.payload)?;
         verify_program_controls(&ctx.accounts.program_config)?;
+        verify_batch_policy_limits(&ctx.accounts.program_config, &args.payload)?;
         verify_nonce_range(&args.payload)?;
-        verify_histogram_count(&args.payload)?;
+        verify_histogram_integrity(&args.payload)?;
         verify_batch_hash(&args.payload)?;
         verify_batch_continuity(
             &ctx.accounts.character_settlement_batch_cursor,
@@ -193,6 +194,13 @@ pub mod runana_program {
             &ctx.accounts.character_settlement_batch_cursor,
             &ctx.accounts.season_policy,
             &args.payload,
+        )?;
+        verify_world_eligibility(&args.payload, &ctx.accounts.character_zone_progress_page)?;
+        verify_zone_enemy_legality(
+            &args.payload,
+            &ctx.accounts.zone_registry,
+            &ctx.accounts.zone_enemy_set,
+            &ctx.accounts.enemy_archetype_registry,
         )?;
 
         let exp_delta = derive_exp_delta(
@@ -827,6 +835,22 @@ fn verify_program_controls(program_config: &ProgramConfigAccount) -> Result<()> 
     Ok(())
 }
 
+fn verify_batch_policy_limits(
+    program_config: &ProgramConfigAccount,
+    payload: &SettlementBatchPayloadV1,
+) -> Result<()> {
+    require!(
+        payload.battle_count <= program_config.max_battles_per_batch,
+        SettlementError::BatchBattleCountLimitExceeded
+    );
+    require!(
+        payload.encounter_histogram.len()
+            <= usize::from(program_config.max_histogram_entries_per_batch),
+        SettlementError::HistogramEntryLimitExceeded
+    );
+    Ok(())
+}
+
 fn verify_character_binding(
     ctx: &Context<ApplyBattleSettlementBatchV1>,
     payload: &SettlementBatchPayloadV1,
@@ -1035,7 +1059,22 @@ fn verify_nonce_range(payload: &SettlementBatchPayloadV1) -> Result<()> {
     Ok(())
 }
 
-fn verify_histogram_count(payload: &SettlementBatchPayloadV1) -> Result<()> {
+fn verify_histogram_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> {
+    for (index, entry) in payload.encounter_histogram.iter().enumerate() {
+        require!(
+            entry.count > 0,
+            SettlementError::ZeroEncounterHistogramEntry
+        );
+
+        let is_duplicate = payload.encounter_histogram[..index].iter().any(|prior| {
+            prior.zone_id == entry.zone_id && prior.enemy_archetype_id == entry.enemy_archetype_id
+        });
+        require!(
+            !is_duplicate,
+            SettlementError::DuplicateEncounterHistogramEntry
+        );
+    }
+
     let histogram_total = payload
         .encounter_histogram
         .iter()
@@ -1048,6 +1087,71 @@ fn verify_histogram_count(payload: &SettlementBatchPayloadV1) -> Result<()> {
         histogram_total == u64::from(payload.battle_count),
         SettlementError::HistogramCountMismatch
     );
+
+    Ok(())
+}
+
+fn verify_world_eligibility(
+    payload: &SettlementBatchPayloadV1,
+    character_zone_progress_page: &CharacterZoneProgressPageAccount,
+) -> Result<()> {
+    for entry in &payload.encounter_histogram {
+        let effective_zone_state =
+            effective_zone_state_after_batch(entry.zone_id, payload, character_zone_progress_page)?;
+        require!(
+            effective_zone_state >= ZONE_STATE_UNLOCKED,
+            SettlementError::IllegalLockedZoneReference
+        );
+    }
+
+    Ok(())
+}
+
+fn effective_zone_state_after_batch(
+    zone_id: u16,
+    payload: &SettlementBatchPayloadV1,
+    character_zone_progress_page: &CharacterZoneProgressPageAccount,
+) -> Result<u8> {
+    let expected_page_index = zone_id / ZONE_PAGE_WIDTH;
+    require!(
+        expected_page_index == character_zone_progress_page.page_index,
+        SettlementError::InvalidZoneProgressPage
+    );
+
+    let zone_offset = (zone_id % ZONE_PAGE_WIDTH) as usize;
+    let mut effective_state = character_zone_progress_page.zone_states[zone_offset];
+
+    for delta in &payload.zone_progress_delta {
+        if delta.zone_id == zone_id && delta.new_state > effective_state {
+            effective_state = delta.new_state;
+        }
+    }
+
+    Ok(effective_state)
+}
+
+fn verify_zone_enemy_legality(
+    payload: &SettlementBatchPayloadV1,
+    zone_registry: &ZoneRegistryAccount,
+    zone_enemy_set: &ZoneEnemySetAccount,
+    enemy_archetype_registry: &EnemyArchetypeRegistryAccount,
+) -> Result<()> {
+    require!(
+        zone_registry.zone_id == zone_enemy_set.zone_id,
+        SettlementError::ZoneEnemySetMismatch
+    );
+    require!(
+        zone_enemy_set.allowed_enemy_archetype_id == enemy_archetype_registry.enemy_archetype_id,
+        SettlementError::ZoneEnemySetMismatch
+    );
+
+    for entry in &payload.encounter_histogram {
+        require!(
+            entry.zone_id == zone_registry.zone_id
+                && entry.enemy_archetype_id == zone_enemy_set.allowed_enemy_archetype_id,
+            SettlementError::IllegalZoneEnemyPair
+        );
+    }
 
     Ok(())
 }
@@ -1185,12 +1289,9 @@ fn derive_exp_delta(
     let mut total_exp = 0_u128;
     for entry in &payload.encounter_histogram {
         require!(
-            entry.zone_id == zone_registry.zone_id,
-            SettlementError::EncounterZoneMismatch
-        );
-        require!(
-            entry.enemy_archetype_id == enemy_archetype_registry.enemy_archetype_id,
-            SettlementError::EncounterEnemyMismatch
+            entry.zone_id == zone_registry.zone_id
+                && entry.enemy_archetype_id == enemy_archetype_registry.enemy_archetype_id,
+            SettlementError::IllegalZoneEnemyPair
         );
 
         let weighted_exp = u128::from(entry.count)
@@ -1338,6 +1439,14 @@ pub enum SettlementError {
     InvalidNonceRange,
     #[msg("The encounter histogram total does not match battle_count")]
     HistogramCountMismatch,
+    #[msg("The settlement batch exceeds the configured max_battles_per_batch")]
+    BatchBattleCountLimitExceeded,
+    #[msg("The settlement batch exceeds the configured max_histogram_entries_per_batch")]
+    HistogramEntryLimitExceeded,
+    #[msg("Duplicate encounter histogram zone/enemy pairs are forbidden")]
+    DuplicateEncounterHistogramEntry,
+    #[msg("Encounter histogram entries must have non-zero counts")]
+    ZeroEncounterHistogramEntry,
     #[msg("The canonical settlement preimage could not be serialized")]
     PreimageSerializationFailed,
     #[msg("The recomputed batch hash does not match the payload batch hash")]
@@ -1386,6 +1495,10 @@ pub enum SettlementError {
     SeasonPolicyMismatch,
     #[msg("The provided zone enemy set is inconsistent with the zone or enemy registry")]
     ZoneEnemySetMismatch,
+    #[msg("The settlement batch references a zone that is not unlocked for this character")]
+    IllegalLockedZoneReference,
+    #[msg("The settlement batch references an enemy that is not legal for the zone")]
+    IllegalZoneEnemyPair,
     #[msg("The encounter histogram zone does not match the provided zone registry")]
     EncounterZoneMismatch,
     #[msg("The encounter histogram enemy does not match the provided enemy registry")]

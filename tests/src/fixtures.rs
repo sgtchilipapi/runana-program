@@ -420,11 +420,6 @@ pub fn derive_exp_delta(
 ) -> u32 {
     let mut total_exp_u128 = 0_u128;
     for entry in encounter_histogram {
-        assert_eq!(entry.zone_id, zone.zone_id, "fixture expects a single zone");
-        assert_eq!(
-            entry.enemy_archetype_id, enemy.enemy_archetype_id,
-            "fixture expects a single enemy archetype",
-        );
         let weighted_exp_u128 = u128::from(entry.count)
             * u128::from(enemy.exp_reward_base)
             * u128::from(zone.exp_multiplier_num)
