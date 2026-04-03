@@ -79,6 +79,12 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
         )
         .expect("cursor fetch should succeed")
         .expect("cursor should exist after settlement");
+    let season_policy = harness
+        .fetch_anchor_account::<runana_program::SeasonPolicyAccount>(
+            fixtures.season.season_policy_pubkey,
+        )
+        .expect("season policy fetch should succeed")
+        .expect("season policy should exist after bootstrap");
 
     assert_eq!(character_root.authority, fixtures.character.authority);
     assert_eq!(character_root.character_id, fixtures.character.character_id);
@@ -119,4 +125,5 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
         cursor.last_committed_season_id,
         fixtures.batch.payload.season_id
     );
+    assert_eq!(season_policy.season_id, fixtures.season.season_id);
 }

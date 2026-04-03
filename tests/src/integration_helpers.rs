@@ -22,8 +22,9 @@ use crate::fixtures::{
     apply_battle_settlement_batch_v1_args_for_fixture, canonical_admin_keypair,
     canonical_authority_keypair, canonical_server_signer_keypair,
     create_character_args_for_fixture, initialize_enemy_archetype_registry_args_for_fixture,
-    initialize_program_config_args_for_fixture, initialize_zone_enemy_set_args_for_fixture,
-    initialize_zone_registry_args_for_fixture, CanonicalFixtureSet,
+    initialize_program_config_args_for_fixture, initialize_season_policy_args_for_fixture,
+    initialize_zone_enemy_set_args_for_fixture, initialize_zone_registry_args_for_fixture,
+    CanonicalFixtureSet,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +58,7 @@ impl LocalnetRelayerHarness {
         fixtures: &CanonicalFixtureSet,
     ) -> Result<(), Box<dyn Error>> {
         self.ensure_program_config(fixtures)?;
+        self.ensure_season_policy(fixtures)?;
         self.ensure_zone_registry(fixtures)?;
         self.ensure_zone_enemy_set(fixtures)?;
         self.ensure_enemy_archetype_registry(fixtures)?;
@@ -69,6 +71,21 @@ impl LocalnetRelayerHarness {
         fixtures: &CanonicalFixtureSet,
         pre_instructions: &[Instruction],
     ) -> Result<Vec<Instruction>, ClientError> {
+        self.build_settlement_request_instructions_with_accounts_and_args(
+            fixtures,
+            fixtures.character.authority,
+            apply_battle_settlement_batch_v1_args_for_fixture(fixtures),
+            pre_instructions,
+        )
+    }
+
+    pub fn build_settlement_request_instructions_with_accounts_and_args(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+        player_authority: Pubkey,
+        args: runana_program::ApplyBattleSettlementBatchV1Args,
+        pre_instructions: &[Instruction],
+    ) -> Result<Vec<Instruction>, ClientError> {
         let mut request = self.program.request();
         for ix in pre_instructions.iter().cloned() {
             request = request.instruction(ix);
@@ -76,7 +93,7 @@ impl LocalnetRelayerHarness {
 
         request
             .accounts(runana_program::accounts::ApplyBattleSettlementBatchV1 {
-                player_authority: fixtures.character.authority,
+                player_authority,
                 instructions_sysvar: anchor_client::solana_sdk::sysvar::instructions::ID,
                 program_config: fixtures.program.program_config_pubkey,
                 character_root: fixtures.character.character_root_pubkey,
@@ -88,13 +105,12 @@ impl LocalnetRelayerHarness {
                 zone_registry: fixtures.zone.zone_registry_pubkey,
                 zone_enemy_set: fixtures.zone.zone_enemy_set_pubkey,
                 enemy_archetype_registry: fixtures.enemy.enemy_archetype_pubkey,
+                season_policy: fixtures.season.season_policy_pubkey,
                 character_settlement_batch_cursor: fixtures
                     .character
                     .character_settlement_batch_cursor_pubkey,
             })
-            .args(runana_program::instruction::ApplyBattleSettlementBatchV1 {
-                args: apply_battle_settlement_batch_v1_args_for_fixture(fixtures),
-            })
+            .args(runana_program::instruction::ApplyBattleSettlementBatchV1 { args })
             .instructions()
     }
 
@@ -105,18 +121,26 @@ impl LocalnetRelayerHarness {
     ) -> Result<Signature, Box<dyn Error>> {
         let instructions =
             self.build_settlement_request_instructions(fixtures, pre_instructions)?;
-        let lookup_table = self.create_lookup_table_for_instructions(&instructions)?;
         let authority = canonical_authority_keypair();
-        self.ensure_wallet_funded(&authority)?;
+        self.submit_versioned_transaction_with_signers(&instructions, &authority, &[&authority])
+    }
+
+    pub fn submit_versioned_transaction_with_signers(
+        &self,
+        instructions: &[Instruction],
+        fee_payer: &Keypair,
+        signers: &[&Keypair],
+    ) -> Result<Signature, Box<dyn Error>> {
+        let lookup_table = self.create_lookup_table_for_instructions(instructions)?;
+        self.ensure_wallet_funded(fee_payer)?;
         let blockhash = self.program.rpc().get_latest_blockhash()?;
         let message = v0::Message::try_compile(
-            &authority.pubkey(),
-            &instructions,
+            &fee_payer.pubkey(),
+            instructions,
             &[lookup_table],
             blockhash,
         )?;
-        let transaction =
-            VersionedTransaction::try_new(VersionedMessage::V0(message), &[&authority])?;
+        let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), signers)?;
 
         Ok(self
             .program
@@ -209,6 +233,35 @@ impl LocalnetRelayerHarness {
             })
             .args(runana_program::instruction::InitializeZoneRegistry {
                 args: initialize_zone_registry_args_for_fixture(fixtures),
+            })
+            .signer(&admin)
+            .send()?;
+
+        Ok(())
+    }
+
+    fn ensure_season_policy(&self, fixtures: &CanonicalFixtureSet) -> Result<(), Box<dyn Error>> {
+        if self
+            .fetch_anchor_account::<runana_program::SeasonPolicyAccount>(
+                fixtures.season.season_policy_pubkey,
+            )?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let admin = canonical_admin_keypair();
+        self.program
+            .request()
+            .accounts(runana_program::accounts::InitializeSeasonPolicy {
+                payer: self.relayer.pubkey(),
+                admin_authority: admin.pubkey(),
+                program_config: fixtures.program.program_config_pubkey,
+                season_policy: fixtures.season.season_policy_pubkey,
+                system_program: anchor_client::solana_sdk::system_program::ID,
+            })
+            .args(runana_program::instruction::InitializeSeasonPolicy {
+                args: initialize_season_policy_args_for_fixture(fixtures),
             })
             .signer(&admin)
             .send()?;
@@ -387,8 +440,8 @@ impl LocalnetRelayerHarness {
         let recent_slot = self
             .program
             .rpc()
-            .get_slot_with_commitment(CommitmentConfig::processed())?
-            .saturating_sub(1);
+            .get_slot_with_commitment(CommitmentConfig::processed())?;
+        self.wait_for_slot_advance(recent_slot)?;
         let (create_ix, lookup_table_address) =
             address_lookup_table::instruction::create_lookup_table_signed(
                 self.relayer.pubkey(),
@@ -476,6 +529,10 @@ pub fn sign_player_authorization(fixtures: &CanonicalFixtureSet) -> SignedEd2551
         &canonical_authority_keypair(),
         &fixtures.batch.player_authorization_message,
     )
+}
+
+pub fn sign_arbitrary_message(signer: &Keypair, message: &[u8]) -> SignedEd25519Message {
+    sign_message(signer, message)
 }
 
 pub fn build_ed25519_verification_instruction(signed: &SignedEd25519Message) -> Instruction {

@@ -8,8 +8,9 @@ use anchor_client::solana_sdk::{
 };
 use runana_program::{
     ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, EncounterCountEntry,
-    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs, InitializeZoneEnemySetArgs,
-    InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
+    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs, InitializeSeasonPolicyArgs,
+    InitializeZoneEnemySetArgs, InitializeZoneRegistryArgs, SettlementBatchPayloadV1,
+    ZoneProgressDeltaEntry,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,15 +19,18 @@ pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
 pub const SCHEMA_VERSION_CANONICAL_V2: u16 = 2;
 pub const ZONE_STATE_UNLOCKED: u8 = 1;
 pub const CHARACTER_BATCH_CURSOR_SEED: &[u8] = b"character_batch_cursor";
+pub const SEASON_POLICY_SEED: &[u8] = b"season_policy";
 pub const CANONICAL_AUTHORITY_SEED: [u8; 32] = [7; 32];
 pub const CANONICAL_ADMIN_SEED: [u8; 32] = [8; 32];
 pub const CANONICAL_SERVER_SIGNER_SEED: [u8; 32] = [9; 32];
 pub const CANONICAL_RELAYER_SEED: [u8; 32] = [10; 32];
+pub const CANONICAL_ALT_AUTHORITY_SEED: [u8; 32] = [11; 32];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalFixtureSet {
     pub program: CanonicalProgramFixture,
     pub character: CanonicalCharacterFixture,
+    pub season: CanonicalSeasonFixture,
     pub zone: CanonicalZoneFixture,
     pub enemy: CanonicalEnemyFixture,
     pub batch: CanonicalBatchFixture,
@@ -58,6 +62,15 @@ pub struct CanonicalCharacterFixture {
     pub character_settlement_batch_cursor_pubkey: Pubkey,
     pub unlocked_zone_ids: Vec<u16>,
     pub cursor: CanonicalCursorFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalSeasonFixture {
+    pub season_id: u32,
+    pub season_policy_pubkey: Pubkey,
+    pub season_start_ts: u64,
+    pub season_end_ts: u64,
+    pub commit_grace_end_ts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,7 +155,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     let mut character_id = *b"char_fixture_000";
     character_id[8..16].copy_from_slice(&discriminator.to_le_bytes());
     let character_creation_ts = 1_720_000_000;
-    let season_id_at_creation = 1;
+    let season_id_at_creation = 1_u32.saturating_add((discriminator as u32) & 0x3fff_ffff);
     let zone_id: u16 = 7;
     let enemy_archetype_id: u16 = 42;
     let page_index_u16: u16 = zone_id / 256;
@@ -181,6 +194,10 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         &[b"enemy_archetype", &enemy_archetype_id.to_le_bytes()],
         &program_id,
     );
+    let (season_policy_pubkey, _) = Pubkey::find_program_address(
+        &[SEASON_POLICY_SEED, &season_id_at_creation.to_le_bytes()],
+        &program_id,
+    );
 
     let last_committed_state_hash = genesis_state_hash(character_root_pubkey, character_id);
     let cursor = CanonicalCursorFixture {
@@ -203,6 +220,14 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         character_settlement_batch_cursor_pubkey,
         unlocked_zone_ids: vec![zone_id],
         cursor,
+    };
+
+    let season = CanonicalSeasonFixture {
+        season_id: season_id_at_creation,
+        season_policy_pubkey,
+        season_start_ts: character_creation_ts.saturating_sub(60),
+        season_end_ts: character_creation_ts + 86_400,
+        commit_grace_end_ts: 4_100_000_000,
     };
 
     let zone = CanonicalZoneFixture {
@@ -293,6 +318,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     CanonicalFixtureSet {
         program,
         character,
+        season,
         zone,
         enemy,
         batch,
@@ -469,6 +495,10 @@ pub fn canonical_relayer_keypair() -> Keypair {
     keypair_from_seed(&CANONICAL_RELAYER_SEED).expect("relayer seed should be valid")
 }
 
+pub fn canonical_alt_authority_keypair() -> Keypair {
+    keypair_from_seed(&CANONICAL_ALT_AUTHORITY_SEED).expect("alt authority seed should be valid")
+}
+
 pub fn canonical_apply_battle_settlement_batch_v1_args() -> ApplyBattleSettlementBatchV1Args {
     let fixtures = canonical_fixture_set();
     apply_battle_settlement_batch_v1_args_for_fixture(&fixtures)
@@ -518,6 +548,17 @@ pub fn initialize_enemy_archetype_registry_args_for_fixture(
     InitializeEnemyArchetypeRegistryArgs {
         enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
         exp_reward_base: fixtures.enemy.exp_reward_base,
+    }
+}
+
+pub fn initialize_season_policy_args_for_fixture(
+    fixtures: &CanonicalFixtureSet,
+) -> InitializeSeasonPolicyArgs {
+    InitializeSeasonPolicyArgs {
+        season_id: fixtures.season.season_id,
+        season_start_ts: fixtures.season.season_start_ts,
+        season_end_ts: fixtures.season.season_end_ts,
+        commit_grace_end_ts: fixtures.season.commit_grace_end_ts,
     }
 }
 

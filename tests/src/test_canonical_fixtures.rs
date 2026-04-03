@@ -45,6 +45,12 @@ fn canonical_fixture_set_is_self_consistent() {
         fixtures.batch.payload.season_id,
         fixtures.character.season_id_at_creation
     );
+    assert_eq!(fixtures.season.season_id, fixtures.batch.payload.season_id);
+    assert!(
+        fixtures.season.season_start_ts <= fixtures.batch.payload.first_battle_ts
+            && fixtures.batch.payload.last_battle_ts <= fixtures.season.season_end_ts
+    );
+    assert!(fixtures.season.season_end_ts <= fixtures.season.commit_grace_end_ts);
     assert!(fixtures.batch.payload.zone_progress_delta.is_empty());
     assert_eq!(fixtures.batch.payload.encounter_histogram.len(), 1);
     assert_eq!(

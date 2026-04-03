@@ -8,3 +8,7 @@ mod test_canonical_fixtures;
 mod test_initialize;
 #[cfg(test)]
 mod test_integration_helpers;
+#[cfg(test)]
+mod test_slice2_replay_and_sequencing;
+#[cfg(test)]
+mod test_slice3_time_season_and_throughput;

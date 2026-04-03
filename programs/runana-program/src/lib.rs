@@ -17,12 +17,14 @@ const CHARACTER_BATCH_CURSOR_SEED: &[u8] = b"character_batch_cursor";
 const ZONE_REGISTRY_SEED: &[u8] = b"zone_registry";
 const ZONE_ENEMY_SET_SEED: &[u8] = b"zone_enemy_set";
 const ENEMY_ARCHETYPE_SEED: &[u8] = b"enemy_archetype";
+const SEASON_POLICY_SEED: &[u8] = b"season_policy";
 
 const ACCOUNT_VERSION_V1: u8 = 1;
 const CLUSTER_ID_LOCALNET: u8 = 1;
 const ZONE_STATE_UNLOCKED: u8 = 1;
 const ZONE_STATE_CLEARED: u8 = 2;
 const ZONE_PAGE_WIDTH: u16 = 256;
+const THROUGHPUT_CAP_PER_MINUTE: u64 = 20;
 
 const ED25519_SIGNATURE_COUNT_OFFSET: usize = 0;
 const ED25519_OFFSETS_START: usize = 2;
@@ -93,6 +95,27 @@ pub mod runana_program {
         Ok(())
     }
 
+    pub fn initialize_season_policy(
+        ctx: Context<InitializeSeasonPolicy>,
+        args: InitializeSeasonPolicyArgs,
+    ) -> Result<()> {
+        require!(
+            args.season_start_ts < args.season_end_ts
+                && args.season_end_ts <= args.commit_grace_end_ts,
+            SettlementError::InvalidSeasonPolicy
+        );
+
+        let season_policy = &mut ctx.accounts.season_policy;
+        season_policy.version = ACCOUNT_VERSION_V1;
+        season_policy.bump = ctx.bumps.season_policy;
+        season_policy.season_id = args.season_id;
+        season_policy.season_start_ts = args.season_start_ts;
+        season_policy.season_end_ts = args.season_end_ts;
+        season_policy.commit_grace_end_ts = args.commit_grace_end_ts;
+        season_policy.updated_at_slot = Clock::get()?.slot;
+        Ok(())
+    }
+
     pub fn create_character(
         ctx: Context<CreateCharacter>,
         args: CreateCharacterArgs,
@@ -156,6 +179,7 @@ pub mod runana_program {
     ) -> Result<()> {
         verify_canonical_account_addresses(&ctx)?;
         verify_character_binding(&ctx, &args.payload)?;
+        verify_program_controls(&ctx.accounts.program_config)?;
         verify_nonce_range(&args.payload)?;
         verify_histogram_count(&args.payload)?;
         verify_batch_hash(&args.payload)?;
@@ -164,6 +188,12 @@ pub mod runana_program {
             &args.payload,
         )?;
         verify_ed25519_preinstructions(&ctx, &args.payload)?;
+        verify_time_season_and_throughput(
+            &ctx.accounts.character_root,
+            &ctx.accounts.character_settlement_batch_cursor,
+            &ctx.accounts.season_policy,
+            &args.payload,
+        )?;
 
         let exp_delta = derive_exp_delta(
             &args.payload,
@@ -288,6 +318,29 @@ pub struct InitializeEnemyArchetypeRegistry<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(args: InitializeSeasonPolicyArgs)]
+pub struct InitializeSeasonPolicy<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub admin_authority: Signer<'info>,
+    #[account(
+        seeds = [PROGRAM_CONFIG_SEED],
+        bump = program_config.bump,
+        constraint = program_config.admin_authority == admin_authority.key() @ SettlementError::UnauthorizedAdmin,
+    )]
+    pub program_config: Account<'info, ProgramConfigAccount>,
+    #[account(
+        init,
+        payer = payer,
+        seeds = [SEASON_POLICY_SEED, &args.season_id.to_le_bytes()],
+        bump,
+        space = SeasonPolicyAccount::LEN,
+    )]
+    pub season_policy: Account<'info, SeasonPolicyAccount>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 #[instruction(args: CreateCharacterArgs)]
 pub struct CreateCharacter<'info> {
     #[account(
@@ -361,6 +414,7 @@ pub struct ApplyBattleSettlementBatchV1<'info> {
     pub zone_registry: Account<'info, ZoneRegistryAccount>,
     pub zone_enemy_set: Account<'info, ZoneEnemySetAccount>,
     pub enemy_archetype_registry: Account<'info, EnemyArchetypeRegistryAccount>,
+    pub season_policy: Account<'info, SeasonPolicyAccount>,
     #[account(mut)]
     pub character_settlement_batch_cursor: Account<'info, CharacterSettlementBatchCursorAccount>,
 }
@@ -471,6 +525,21 @@ impl EnemyArchetypeRegistryAccount {
 }
 
 #[account]
+pub struct SeasonPolicyAccount {
+    pub version: u8,
+    pub bump: u8,
+    pub season_id: u32,
+    pub season_start_ts: u64,
+    pub season_end_ts: u64,
+    pub commit_grace_end_ts: u64,
+    pub updated_at_slot: u64,
+}
+
+impl SeasonPolicyAccount {
+    pub const LEN: usize = 8 + 1 + 1 + 4 + 8 + 8 + 8 + 8;
+}
+
+#[account]
 pub struct CharacterSettlementBatchCursorAccount {
     pub version: u8,
     pub bump: u8,
@@ -512,6 +581,14 @@ pub struct InitializeZoneEnemySetArgs {
 pub struct InitializeEnemyArchetypeRegistryArgs {
     pub enemy_archetype_id: u16,
     pub exp_reward_base: u32,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InitializeSeasonPolicyArgs {
+    pub season_id: u32,
+    pub season_start_ts: u64,
+    pub season_end_ts: u64,
+    pub commit_grace_end_ts: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -709,6 +786,19 @@ fn verify_canonical_account_addresses(ctx: &Context<ApplyBattleSettlementBatchV1
         SettlementError::InvalidEnemyArchetypePda
     );
 
+    let (expected_season_policy, _) = Pubkey::find_program_address(
+        &[
+            SEASON_POLICY_SEED,
+            &ctx.accounts.season_policy.season_id.to_le_bytes(),
+        ],
+        program_id,
+    );
+    require_keys_eq!(
+        ctx.accounts.season_policy.key(),
+        expected_season_policy,
+        SettlementError::InvalidSeasonPolicyPda
+    );
+
     let (expected_zone_progress_page, _) = Pubkey::find_program_address(
         &[
             CHARACTER_ZONE_PROGRESS_SEED,
@@ -726,6 +816,14 @@ fn verify_canonical_account_addresses(ctx: &Context<ApplyBattleSettlementBatchV1
         SettlementError::InvalidZoneProgressPagePda
     );
 
+    Ok(())
+}
+
+fn verify_program_controls(program_config: &ProgramConfigAccount) -> Result<()> {
+    require!(
+        !program_config.settlement_paused,
+        SettlementError::SettlementPaused
+    );
     Ok(())
 }
 
@@ -816,27 +914,40 @@ fn verify_ed25519_preinstructions(
         payload.signature_scheme,
     );
 
-    verify_ed25519_instruction_payload(
-        &server_ix.data,
-        &ctx.accounts.program_config.trusted_server_signer,
-        &expected_server_message,
-    )
-    .map_err(|_| error!(SettlementError::ServerAttestationMismatch))?;
-    verify_ed25519_instruction_payload(
-        &player_ix.data,
-        &ctx.accounts.player_authority.key(),
-        &expected_player_message,
-    )
-    .map_err(|_| error!(SettlementError::PlayerAuthorizationMismatch))?;
+    let server_ix_payload = parse_ed25519_instruction_payload(&server_ix.data)?;
+    let player_ix_payload = parse_ed25519_instruction_payload(&player_ix.data)?;
+    let expected_server_signer = ctx.accounts.program_config.trusted_server_signer;
+    let expected_player_signer = ctx.accounts.player_authority.key();
+
+    let server_signer_matches = server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
+    let player_signer_matches = player_ix_payload.signer_pubkey == expected_player_signer.as_ref();
+
+    if !server_signer_matches
+        && !player_signer_matches
+        && server_ix_payload.signer_pubkey == expected_player_signer.as_ref()
+        && player_ix_payload.signer_pubkey == expected_server_signer.as_ref()
+    {
+        return err!(SettlementError::InvalidEd25519InstructionOrder);
+    }
+
+    require!(
+        server_signer_matches && server_ix_payload.message == expected_server_message.as_slice(),
+        SettlementError::ServerAttestationMismatch
+    );
+    require!(
+        player_signer_matches && player_ix_payload.message == expected_player_message.as_slice(),
+        SettlementError::PlayerAuthorizationMismatch
+    );
 
     Ok(())
 }
 
-fn verify_ed25519_instruction_payload(
-    data: &[u8],
-    expected_pubkey: &Pubkey,
-    expected_message: &[u8],
-) -> Result<()> {
+struct ParsedEd25519InstructionPayload<'a> {
+    signer_pubkey: &'a [u8],
+    message: &'a [u8],
+}
+
+fn parse_ed25519_instruction_payload(data: &[u8]) -> Result<ParsedEd25519InstructionPayload<'_>> {
     require!(
         data.len() >= ED25519_OFFSETS_START + ED25519_OFFSETS_SIZE,
         SettlementError::InvalidEd25519InstructionData
@@ -898,16 +1009,10 @@ fn verify_ed25519_instruction_payload(
         SettlementError::InvalidEd25519InstructionData
     );
 
-    require!(
-        &data[public_key_offset..public_key_end] == expected_pubkey.as_ref(),
-        SettlementError::InvalidEd25519InstructionData
-    );
-    require!(
-        &data[message_data_offset..message_end] == expected_message,
-        SettlementError::InvalidEd25519InstructionData
-    );
-
-    Ok(())
+    Ok(ParsedEd25519InstructionPayload {
+        signer_pubkey: &data[public_key_offset..public_key_end],
+        message: &data[message_data_offset..message_end],
+    })
 }
 
 fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
@@ -986,6 +1091,73 @@ fn verify_batch_continuity(
     require!(
         payload.start_state_hash == cursor.last_committed_state_hash,
         SettlementError::StartStateHashMismatch
+    );
+
+    Ok(())
+}
+
+fn verify_time_season_and_throughput(
+    character_root: &CharacterRootAccount,
+    cursor: &CharacterSettlementBatchCursorAccount,
+    season_policy: &SeasonPolicyAccount,
+    payload: &SettlementBatchPayloadV1,
+) -> Result<()> {
+    require!(
+        season_policy.season_id == payload.season_id,
+        SettlementError::SeasonPolicyMismatch
+    );
+    require!(
+        season_policy.season_start_ts < season_policy.season_end_ts
+            && season_policy.season_end_ts <= season_policy.commit_grace_end_ts,
+        SettlementError::InvalidSeasonPolicy
+    );
+    require!(
+        payload.first_battle_ts >= character_root.character_creation_ts,
+        SettlementError::PreCharacterTimestamp
+    );
+    require!(
+        payload.first_battle_ts >= cursor.last_committed_battle_ts,
+        SettlementError::BattleTimestampRegression
+    );
+    require!(
+        payload.last_battle_ts >= payload.first_battle_ts,
+        SettlementError::BattleTimestampRegression
+    );
+    require!(
+        payload.season_id >= cursor.last_committed_season_id,
+        SettlementError::SeasonRegression
+    );
+    require!(
+        payload.first_battle_ts >= season_policy.season_start_ts,
+        SettlementError::SeasonWindowClosed
+    );
+    require!(
+        payload.last_battle_ts <= season_policy.season_end_ts,
+        SettlementError::SeasonWindowClosed
+    );
+
+    let current_unix_timestamp = Clock::get()?.unix_timestamp;
+    require!(
+        current_unix_timestamp >= 0,
+        SettlementError::InvalidClockTimestamp
+    );
+    require!(
+        (current_unix_timestamp as u64) <= season_policy.commit_grace_end_ts,
+        SettlementError::SeasonWindowClosed
+    );
+
+    let interval_seconds = payload
+        .last_battle_ts
+        .checked_sub(payload.first_battle_ts)
+        .ok_or_else(|| error!(SettlementError::BattleTimestampRegression))?;
+    let allowed_battles = interval_seconds
+        .checked_mul(THROUGHPUT_CAP_PER_MINUTE)
+        .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?
+        / 60
+        + 1;
+    require!(
+        u64::from(payload.battle_count) <= allowed_battles,
+        SettlementError::ThroughputExceeded
     );
 
     Ok(())
@@ -1148,6 +1320,8 @@ fn put_option_u32(out: &mut Vec<u8>, value: Option<u32>) {
 pub enum SettlementError {
     #[msg("The provided admin signer is not authorized for this registry mutation")]
     UnauthorizedAdmin,
+    #[msg("Settlement is paused by program policy")]
+    SettlementPaused,
     #[msg("The instructions sysvar account could not be parsed")]
     InvalidInstructionsSysvar,
     #[msg("Two ed25519 verification instructions must precede the settlement instruction")]
@@ -1198,18 +1372,36 @@ pub enum SettlementError {
     InvalidZoneEnemySetPda,
     #[msg("The enemy archetype PDA does not match the canonical seed")]
     InvalidEnemyArchetypePda,
+    #[msg("The season policy PDA does not match the canonical seed")]
+    InvalidSeasonPolicyPda,
     #[msg("The character zone progress page PDA does not match the canonical seed")]
     InvalidZoneProgressPagePda,
     #[msg("Zone progression updates require the matching page account")]
     InvalidZoneProgressPage,
     #[msg("The zone configuration is invalid")]
     InvalidZoneConfig,
+    #[msg("The season policy configuration is invalid")]
+    InvalidSeasonPolicy,
+    #[msg("The provided season policy does not match the settlement payload season id")]
+    SeasonPolicyMismatch,
     #[msg("The provided zone enemy set is inconsistent with the zone or enemy registry")]
     ZoneEnemySetMismatch,
     #[msg("The encounter histogram zone does not match the provided zone registry")]
     EncounterZoneMismatch,
     #[msg("The encounter histogram enemy does not match the provided enemy registry")]
     EncounterEnemyMismatch,
+    #[msg("The first battle timestamp predates character creation")]
+    PreCharacterTimestamp,
+    #[msg("Battle timestamps must be monotonic and non-regressing")]
+    BattleTimestampRegression,
+    #[msg("The settlement season id must be monotonic")]
+    SeasonRegression,
+    #[msg("The settlement season window or grace window is closed")]
+    SeasonWindowClosed,
+    #[msg("The claimed battle density exceeds the deterministic throughput cap")]
+    ThroughputExceeded,
+    #[msg("The cluster clock timestamp is invalid")]
+    InvalidClockTimestamp,
     #[msg("Settlement math overflowed")]
     ArithmeticOverflow,
 }
