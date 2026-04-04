@@ -57,12 +57,20 @@ impl LocalnetRelayerHarness {
         &self,
         fixtures: &CanonicalFixtureSet,
     ) -> Result<(), Box<dyn Error>> {
+        self.bootstrap_slice1_static_fixture_state(fixtures)?;
+        self.ensure_character(fixtures)?;
+        Ok(())
+    }
+
+    pub fn bootstrap_slice1_static_fixture_state(
+        &self,
+        fixtures: &CanonicalFixtureSet,
+    ) -> Result<(), Box<dyn Error>> {
         self.ensure_program_config(fixtures)?;
         self.ensure_season_policy(fixtures)?;
         self.ensure_zone_registry(fixtures)?;
         self.ensure_zone_enemy_set(fixtures)?;
         self.ensure_enemy_archetype_registry(fixtures)?;
-        self.ensure_character(fixtures)?;
         Ok(())
     }
 
@@ -564,7 +572,7 @@ impl LocalnetRelayerHarness {
         self.submit_create_character_with_signers(fixtures, &authority, &[&authority])
     }
 
-    fn build_create_character_instructions(
+    pub fn build_create_character_instructions(
         &self,
         fixtures: &CanonicalFixtureSet,
         payer: Pubkey,

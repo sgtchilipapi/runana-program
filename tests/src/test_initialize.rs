@@ -1,7 +1,9 @@
 use crate::{
+    fixtures::canonical_authority_keypair,
     fixtures::unique_integration_fixture_set,
     integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
 };
+use anchor_client::solana_sdk::signature::Signer;
 
 #[test]
 fn test_create_character_requires_player_as_payer() {
@@ -126,4 +128,102 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
         fixtures.batch.payload.season_id
     );
     assert_eq!(season_policy.season_id, fixtures.season.season_id);
+}
+
+#[test]
+fn test_create_character_persists_historical_character_creation_timestamp() {
+    let fixtures = unique_integration_fixture_set();
+    let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+
+    let tx = harness
+        .submit_create_character_with_player_payer(&fixtures)
+        .expect("player-funded character creation should succeed");
+
+    harness
+        .assert_signature_confirmed(&tx)
+        .expect("character creation transaction should be confirmed");
+
+    let character_root = harness
+        .fetch_anchor_account::<runana_program::CharacterRootAccount>(
+            fixtures.character.character_root_pubkey,
+        )
+        .expect("character root fetch should succeed")
+        .expect("character root should exist after creation");
+    let cursor = harness
+        .fetch_anchor_account::<runana_program::CharacterSettlementBatchCursorAccount>(
+            fixtures.character.character_settlement_batch_cursor_pubkey,
+        )
+        .expect("cursor fetch should succeed")
+        .expect("cursor should exist after creation");
+
+    assert_eq!(
+        character_root.character_creation_ts,
+        fixtures.character.character_creation_ts
+    );
+    assert_eq!(
+        cursor.last_committed_battle_ts,
+        fixtures.character.character_creation_ts
+    );
+}
+
+#[test]
+fn test_apply_battle_settlement_batch_v1_accepts_create_and_settle_in_same_transaction() {
+    let fixtures = unique_integration_fixture_set();
+    let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+    harness
+        .bootstrap_slice1_static_fixture_state(&fixtures)
+        .expect("static fixture state should bootstrap");
+
+    let authority = canonical_authority_keypair();
+    let create_instructions = harness
+        .build_create_character_instructions(&fixtures, authority.pubkey(), authority.pubkey())
+        .expect("create character instructions should build");
+    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let settlement_instructions = harness
+        .build_settlement_request_instructions(&fixtures, &[])
+        .expect("settlement request should build");
+
+    let instructions = create_instructions
+        .into_iter()
+        .chain(pre_instructions)
+        .chain(settlement_instructions)
+        .collect::<Vec<_>>();
+
+    let tx = harness
+        .submit_versioned_transaction_with_signers(&instructions, &authority, &[&authority])
+        .expect("atomic create-plus-settle transaction should succeed");
+
+    harness
+        .assert_signature_confirmed(&tx)
+        .expect("atomic create-plus-settle transaction should be confirmed");
+
+    let character_root = harness
+        .fetch_anchor_account::<runana_program::CharacterRootAccount>(
+            fixtures.character.character_root_pubkey,
+        )
+        .expect("character root fetch should succeed")
+        .expect("character root should exist after atomic sync");
+    let cursor = harness
+        .fetch_anchor_account::<runana_program::CharacterSettlementBatchCursorAccount>(
+            fixtures.character.character_settlement_batch_cursor_pubkey,
+        )
+        .expect("cursor fetch should succeed")
+        .expect("cursor should exist after atomic sync");
+
+    assert_eq!(
+        character_root.character_creation_ts,
+        fixtures.character.character_creation_ts
+    );
+    assert_eq!(
+        cursor.last_committed_end_nonce,
+        fixtures.batch.payload.end_nonce
+    );
+    assert_eq!(
+        cursor.last_committed_batch_id,
+        fixtures.batch.payload.batch_id
+    );
+    assert_eq!(
+        cursor.last_committed_battle_ts,
+        fixtures.batch.payload.last_battle_ts
+    );
 }
