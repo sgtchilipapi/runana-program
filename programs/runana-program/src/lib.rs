@@ -10,6 +10,9 @@ use solana_program::{ed25519_program, hash::hashv};
 declare_id!("CaUejpPZoNjFmSrkfbazrjBUXE8FK1c2Hoz64NFsTfLm");
 
 const PROGRAM_CONFIG_SEED: &[u8] = b"program_config";
+const SIGNATURE_SCHEME_ED25519_RAW_V1: u8 = 0;
+const SIGNATURE_SCHEME_WALLET_TEXT_V1: u8 = 1;
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 const CHARACTER_SEED: &[u8] = b"character";
 const CHARACTER_STATS_SEED: &[u8] = b"character_stats";
 const CHARACTER_WORLD_PROGRESS_SEED: &[u8] = b"character_world_progress";
@@ -1426,7 +1429,7 @@ fn verify_ed25519_preinstructions(
         payload.batch_hash,
         payload.batch_id,
         payload.signature_scheme,
-    );
+    )?;
 
     let server_ix_payload = parse_ed25519_instruction_payload(&server_ix.data)?;
     let player_ix_payload = parse_ed25519_instruction_payload(&player_ix.data)?;
@@ -1983,6 +1986,71 @@ fn canonical_server_attestation_message(
     out
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX_LOWER[(byte >> 4) as usize] as char);
+        out.push(HEX_LOWER[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
+    let mut index = 0;
+
+    while index + 3 <= bytes.len() {
+        let chunk = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | (bytes[index + 2] as u32);
+        out.push(ALPHABET[((chunk >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((chunk >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((chunk >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(chunk & 0x3f) as usize] as char);
+        index += 3;
+    }
+
+    let remaining = bytes.len() - index;
+    if remaining == 1 {
+        let chunk = (bytes[index] as u32) << 16;
+        out.push(ALPHABET[((chunk >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((chunk >> 12) & 0x3f) as usize] as char);
+    } else if remaining == 2 {
+        let chunk = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+        out.push(ALPHABET[((chunk >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((chunk >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((chunk >> 6) & 0x3f) as usize] as char);
+    }
+
+    out
+}
+
+fn canonical_player_authorization_message_text(
+    program_id: &Pubkey,
+    cluster_id: u8,
+    player_authority_pubkey: Pubkey,
+    character_root_pubkey: Pubkey,
+    batch_hash: [u8; 32],
+    batch_id: u64,
+    signature_scheme: u8,
+) -> String {
+    [
+        "RUNANA".to_string(),
+        "settlement".to_string(),
+        signature_scheme.to_string(),
+        cluster_id.to_string(),
+        program_id.to_string(),
+        player_authority_pubkey.to_string(),
+        character_root_pubkey.to_string(),
+        batch_id.to_string(),
+        base64url(&batch_hash),
+    ]
+    .join("|")
+}
+
 fn canonical_player_authorization_message(
     program_id: &Pubkey,
     cluster_id: u8,
@@ -1991,16 +2059,31 @@ fn canonical_player_authorization_message(
     batch_hash: [u8; 32],
     batch_id: u64,
     signature_scheme: u8,
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(program_id.as_ref());
-    out.push(cluster_id);
-    out.extend_from_slice(player_authority_pubkey.as_ref());
-    out.extend_from_slice(character_root_pubkey.as_ref());
-    out.extend_from_slice(&batch_hash);
-    out.extend_from_slice(&batch_id.to_le_bytes());
-    out.push(signature_scheme);
-    out
+) -> Result<Vec<u8>> {
+    match signature_scheme {
+        SIGNATURE_SCHEME_ED25519_RAW_V1 => {
+            let mut out = Vec::new();
+            out.extend_from_slice(program_id.as_ref());
+            out.push(cluster_id);
+            out.extend_from_slice(player_authority_pubkey.as_ref());
+            out.extend_from_slice(character_root_pubkey.as_ref());
+            out.extend_from_slice(&batch_hash);
+            out.extend_from_slice(&batch_id.to_le_bytes());
+            out.push(signature_scheme);
+            Ok(out)
+        }
+        SIGNATURE_SCHEME_WALLET_TEXT_V1 => Ok(canonical_player_authorization_message_text(
+            program_id,
+            cluster_id,
+            player_authority_pubkey,
+            character_root_pubkey,
+            batch_hash,
+            batch_id,
+            signature_scheme,
+        )
+        .into_bytes()),
+        _ => err!(SettlementError::UnsupportedSignatureScheme),
+    }
 }
 
 fn put_zone_progress_delta_vec(out: &mut Vec<u8>, entries: &[ZoneProgressDeltaEntry]) {
@@ -2048,6 +2131,8 @@ pub enum SettlementError {
     ServerAttestationMismatch,
     #[msg("The player authorization contents do not match the settlement payload")]
     PlayerAuthorizationMismatch,
+    #[msg("The settlement payload uses an unsupported signature scheme")]
+    UnsupportedSignatureScheme,
     #[msg("The settlement nonce range does not match battle_count")]
     InvalidNonceRange,
     #[msg("The encounter histogram total does not match battle_count")]
@@ -2158,4 +2243,95 @@ pub enum SettlementError {
     InvalidClockTimestamp,
     #[msg("Settlement math overflowed")]
     ArithmeticOverflow,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seq_pubkey(start: u8) -> Pubkey {
+        Pubkey::new_from_array(std::array::from_fn(|index| start.wrapping_add(index as u8)))
+    }
+
+    #[test]
+    fn canonical_player_authorization_message_supports_legacy_raw_scheme() {
+        let program_id = seq_pubkey(0x70);
+        let player_authority = seq_pubkey(0xb0);
+        let character_root = seq_pubkey(0x90);
+        let batch_hash = std::array::from_fn(|index| 0x50_u8.wrapping_add(index as u8));
+
+        let message = canonical_player_authorization_message(
+            &program_id,
+            CLUSTER_ID_LOCALNET,
+            player_authority,
+            character_root,
+            batch_hash,
+            7,
+            SIGNATURE_SCHEME_ED25519_RAW_V1,
+        )
+        .unwrap();
+
+        assert_eq!(lower_hex(&message), "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f01b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f070000000000000000");
+    }
+
+    #[test]
+    fn canonical_player_authorization_message_supports_wallet_text_scheme() {
+        let program_id = seq_pubkey(0x70);
+        let player_authority = seq_pubkey(0xb0);
+        let character_root = seq_pubkey(0x90);
+        let batch_hash = std::array::from_fn(|index| 0x50_u8.wrapping_add(index as u8));
+
+        let message = canonical_player_authorization_message(
+            &program_id,
+            CLUSTER_ID_LOCALNET,
+            player_authority,
+            character_root,
+            batch_hash,
+            7,
+            SIGNATURE_SCHEME_WALLET_TEXT_V1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(message).unwrap(),
+            format!(
+                "RUNANA|settlement|1|{}|{}|{}|{}|7|UFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm8",
+                CLUSTER_ID_LOCALNET,
+                program_id,
+                player_authority,
+                character_root,
+            ),
+        );
+    }
+
+    #[test]
+    fn canonical_player_authorization_message_rejects_unknown_scheme() {
+        let program_id = seq_pubkey(0x70);
+        let player_authority = seq_pubkey(0xb0);
+        let character_root = seq_pubkey(0x90);
+        let batch_hash = std::array::from_fn(|index| 0x50_u8.wrapping_add(index as u8));
+
+        let error = canonical_player_authorization_message(
+            &program_id,
+            CLUSTER_ID_LOCALNET,
+            player_authority,
+            character_root,
+            batch_hash,
+            7,
+            9,
+        )
+        .unwrap_err();
+
+        match error {
+            anchor_lang::error::Error::AnchorError(anchor_error) => {
+                assert_eq!(
+                    anchor_error.error_code_number,
+                    <SettlementError as Into<u32>>::into(
+                        SettlementError::UnsupportedSignatureScheme,
+                    ),
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }
