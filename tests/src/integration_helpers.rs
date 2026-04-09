@@ -583,6 +583,7 @@ impl LocalnetRelayerHarness {
             .accounts(runana_program::accounts::CreateCharacter {
                 payer,
                 authority,
+                season_policy: fixtures.season.season_policy_pubkey,
                 character_root: fixtures.character.character_root_pubkey,
                 character_stats: fixtures.character.character_stats_pubkey,
                 character_world_progress: fixtures.character.character_world_progress_pubkey,

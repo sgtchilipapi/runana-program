@@ -4,11 +4,22 @@ use crate::{
     integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
 };
 use anchor_client::solana_sdk::signature::Signer;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_secs()
+}
 
 #[test]
 fn test_create_character_requires_player_as_payer() {
     let fixtures = unique_integration_fixture_set();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+    harness
+        .bootstrap_slice1_static_fixture_state(&fixtures)
+        .expect("static fixture state should bootstrap");
 
     let tx = harness
         .submit_create_character_with_player_payer(&fixtures)
@@ -18,8 +29,13 @@ fn test_create_character_requires_player_as_payer() {
         .assert_signature_confirmed(&tx)
         .expect("player-funded character creation should be confirmed");
 
+    let bad_fixtures = unique_integration_fixture_set();
+    harness
+        .bootstrap_slice1_static_fixture_state(&bad_fixtures)
+        .expect("static fixture state should bootstrap for mismatched payer test");
+
     let err = harness
-        .submit_create_character_with_mismatched_payer(&unique_integration_fixture_set())
+        .submit_create_character_with_mismatched_payer(&bad_fixtures)
         .expect_err("non-player-funded character creation should fail");
 
     assert!(
@@ -134,6 +150,9 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
 fn test_create_character_persists_historical_character_creation_timestamp() {
     let fixtures = unique_integration_fixture_set();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+    harness
+        .bootstrap_slice1_static_fixture_state(&fixtures)
+        .expect("static fixture state should bootstrap");
 
     let tx = harness
         .submit_create_character_with_player_payer(&fixtures)
@@ -155,14 +174,44 @@ fn test_create_character_persists_historical_character_creation_timestamp() {
         )
         .expect("cursor fetch should succeed")
         .expect("cursor should exist after creation");
+    let season_policy = harness
+        .fetch_anchor_account::<runana_program::SeasonPolicyAccount>(
+            fixtures.season.season_policy_pubkey,
+        )
+        .expect("season policy fetch should succeed")
+        .expect("season policy should exist after creation");
 
-    assert_eq!(
-        character_root.character_creation_ts,
-        fixtures.character.character_creation_ts
+    assert!(
+        season_policy.season_start_ts <= character_root.character_creation_ts
+            && character_root.character_creation_ts <= season_policy.season_end_ts
     );
     assert_eq!(
         cursor.last_committed_battle_ts,
-        fixtures.character.character_creation_ts
+        character_root.character_creation_ts
+    );
+    assert_eq!(cursor.last_committed_season_id, season_policy.season_id);
+}
+
+#[test]
+fn test_create_character_rejects_closed_season_window() {
+    let now = current_unix_timestamp();
+    let mut fixtures = unique_integration_fixture_set();
+    fixtures.season.season_start_ts = now.saturating_add(3_600);
+    fixtures.season.season_end_ts = now.saturating_add(7_200);
+    fixtures.season.commit_grace_end_ts = now.saturating_add(10_800);
+    let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+    harness
+        .bootstrap_slice1_static_fixture_state(&fixtures)
+        .expect("static fixture state should bootstrap");
+
+    let err = harness
+        .submit_create_character_with_player_payer(&fixtures)
+        .expect_err("creation outside active season window should fail");
+
+    assert!(
+        err.to_string()
+            .contains("The settlement season window or grace window is closed"),
+        "unexpected error: {err}"
     );
 }
 
@@ -210,9 +259,9 @@ fn test_apply_battle_settlement_batch_v1_accepts_create_and_settle_in_same_trans
         .expect("cursor fetch should succeed")
         .expect("cursor should exist after atomic sync");
 
-    assert_eq!(
-        character_root.character_creation_ts,
-        fixtures.character.character_creation_ts
+    assert!(
+        fixtures.season.season_start_ts <= character_root.character_creation_ts
+            && character_root.character_creation_ts <= fixtures.season.season_end_ts
     );
     assert_eq!(
         cursor.last_committed_end_nonce,

@@ -142,6 +142,24 @@ pub mod runana_program {
         ctx: Context<CreateCharacter>,
         args: CreateCharacterArgs,
     ) -> Result<()> {
+        let clock = Clock::get()?;
+        require!(
+            clock.unix_timestamp >= 0,
+            SettlementError::InvalidClockTimestamp
+        );
+        let character_creation_ts = clock.unix_timestamp as u64;
+        require!(
+            ctx.accounts.season_policy.season_start_ts < ctx.accounts.season_policy.season_end_ts
+                && ctx.accounts.season_policy.season_end_ts
+                    <= ctx.accounts.season_policy.commit_grace_end_ts,
+            SettlementError::InvalidSeasonPolicy
+        );
+        require!(
+            ctx.accounts.season_policy.season_start_ts <= character_creation_ts
+                && character_creation_ts <= ctx.accounts.season_policy.season_end_ts,
+            SettlementError::SeasonWindowClosed
+        );
+
         let initial_page_index = args.initial_unlocked_zone_id / ZONE_PAGE_WIDTH;
         require!(
             ctx.accounts.character_zone_progress_page.page_index == initial_page_index,
@@ -156,7 +174,7 @@ pub mod runana_program {
         character_root.bump = ctx.bumps.character_root;
         character_root.authority = ctx.accounts.authority.key();
         character_root.character_id = args.character_id;
-        character_root.character_creation_ts = args.character_creation_ts;
+        character_root.character_creation_ts = character_creation_ts;
 
         let character_stats = &mut ctx.accounts.character_stats;
         character_stats.version = ACCOUNT_VERSION_V1;
@@ -188,9 +206,9 @@ pub mod runana_program {
         cursor.last_committed_end_nonce = 0;
         cursor.last_committed_state_hash = genesis_state_hash;
         cursor.last_committed_batch_id = 0;
-        cursor.last_committed_battle_ts = args.character_creation_ts;
-        cursor.last_committed_season_id = args.season_id_at_creation;
-        cursor.updated_at_slot = Clock::get()?.slot;
+        cursor.last_committed_battle_ts = character_creation_ts;
+        cursor.last_committed_season_id = ctx.accounts.season_policy.season_id;
+        cursor.updated_at_slot = clock.slot;
 
         Ok(())
     }
@@ -437,6 +455,11 @@ pub struct CreateCharacter<'info> {
     )]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
+    #[account(
+        seeds = [SEASON_POLICY_SEED, &season_policy.season_id.to_le_bytes()],
+        bump = season_policy.bump,
+    )]
+    pub season_policy: Account<'info, SeasonPolicyAccount>,
     #[account(
         init,
         payer = payer,
@@ -715,8 +738,6 @@ pub struct InitializeSeasonPolicyArgs {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CreateCharacterArgs {
     pub character_id: [u8; 16],
-    pub character_creation_ts: u64,
-    pub season_id_at_creation: u32,
     pub initial_unlocked_zone_id: u16,
 }
 
@@ -1996,8 +2017,7 @@ fn lower_hex(bytes: &[u8]) -> String {
 }
 
 fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     let mut index = 0;
@@ -2296,10 +2316,7 @@ mod tests {
             String::from_utf8(message).unwrap(),
             format!(
                 "RUNANA|settlement|1|{}|{}|{}|{}|7|UFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm8",
-                CLUSTER_ID_LOCALNET,
-                program_id,
-                player_authority,
-                character_root,
+                CLUSTER_ID_LOCALNET, program_id, player_authority, character_root,
             ),
         );
     }

@@ -12,7 +12,10 @@ use runana_program::{
     InitializeProgramConfigArgs, InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs,
     InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
@@ -342,7 +345,10 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
 
 pub fn unique_integration_fixture_set() -> CanonicalFixtureSet {
     let discriminator = UNIQUE_FIXTURE_DISCRIMINATOR.fetch_add(1, Ordering::Relaxed);
-    canonical_fixture_set_with_discriminator(discriminator)
+    rebuild_fixture_timestamps(
+        canonical_fixture_set_with_discriminator(discriminator),
+        current_unix_timestamp().saturating_add(30),
+    )
 }
 
 pub fn genesis_state_hash(character_root_pubkey: Pubkey, character_id: [u8; 16]) -> [u8; 32] {
@@ -459,6 +465,55 @@ fn fixture_end_state_hash(
     .to_bytes()
 }
 
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_secs()
+}
+
+fn rebuild_fixture_timestamps(
+    mut fixtures: CanonicalFixtureSet,
+    character_creation_ts: u64,
+) -> CanonicalFixtureSet {
+    fixtures.character.character_creation_ts = character_creation_ts;
+    fixtures.character.cursor.last_committed_battle_ts = character_creation_ts;
+    fixtures.season.season_start_ts = character_creation_ts.saturating_sub(60);
+    fixtures.season.season_end_ts = character_creation_ts.saturating_add(86_400);
+    fixtures.batch.payload.first_battle_ts = character_creation_ts.saturating_add(60);
+    fixtures.batch.payload.last_battle_ts = character_creation_ts.saturating_add(180);
+    fixtures.batch.payload.end_state_hash = fixture_end_state_hash(
+        fixtures.character.character_root_pubkey,
+        fixtures.character.character_id,
+        fixtures.batch.payload.batch_id,
+        fixtures.batch.payload.end_nonce,
+        fixtures.batch.payload.last_battle_ts,
+    );
+
+    let batch_hash_preimage = canonical_batch_hash_preimage(&fixtures.batch.payload);
+    let batch_hash = hashv(&[&batch_hash_preimage]).to_bytes();
+    fixtures.batch.batch_hash_preimage = batch_hash_preimage;
+    fixtures.batch.batch_hash = batch_hash;
+    fixtures.batch.server_attestation_message = canonical_server_attestation_message(
+        fixtures.program.program_id,
+        fixtures.program.cluster_id,
+        fixtures.character.character_root_pubkey,
+        &fixtures.batch.payload,
+        batch_hash,
+    );
+    fixtures.batch.player_authorization_message = canonical_player_authorization_message(
+        fixtures.program.program_id,
+        fixtures.program.cluster_id,
+        fixtures.character.authority,
+        fixtures.character.character_root_pubkey,
+        batch_hash,
+        fixtures.batch.payload.batch_id,
+        fixtures.batch.payload.signature_scheme,
+    );
+
+    fixtures
+}
+
 fn put_zone_progress_delta_vec(out: &mut Vec<u8>, entries: &[ZoneProgressDeltaEntryFixture]) {
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for entry in entries {
@@ -572,8 +627,6 @@ pub fn initialize_season_policy_args_for_fixture(
 pub fn create_character_args_for_fixture(fixtures: &CanonicalFixtureSet) -> CreateCharacterArgs {
     CreateCharacterArgs {
         character_id: fixtures.character.character_id,
-        character_creation_ts: fixtures.character.character_creation_ts,
-        season_id_at_creation: fixtures.character.season_id_at_creation,
         initial_unlocked_zone_id: fixtures.zone.zone_id,
     }
 }
