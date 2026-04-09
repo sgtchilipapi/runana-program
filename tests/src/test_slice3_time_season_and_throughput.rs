@@ -96,7 +96,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_delayed_submission_within_grace
     let fixtures = with_season(
         &base,
         base.batch.payload.season_id,
-        base.character.character_creation_ts.saturating_sub(60),
+        base.season.season_start_ts,
         base.batch.payload.last_battle_ts,
         now + 3_600,
     );
@@ -122,7 +122,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_grace_expired_submission() {
     let fixtures = with_season(
         &base,
         base.batch.payload.season_id,
-        base.character.character_creation_ts.saturating_sub(60),
+        base.season.season_start_ts,
         base.batch.payload.last_battle_ts,
         now.saturating_sub(3_600),
     );
@@ -150,7 +150,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_season_regression() {
         &with_season(
             &base,
             regressed_season_id,
-            base.character.character_creation_ts.saturating_sub(60),
+            base.season.season_start_ts,
             base.batch.payload.last_battle_ts + 60,
             current_unix_timestamp() + 3_600,
         ),
@@ -172,11 +172,11 @@ fn test_apply_battle_settlement_batch_v1_rejects_season_regression() {
 }
 
 #[test]
-fn test_apply_battle_settlement_batch_v1_rejects_pre_character_timestamp() {
+fn test_apply_battle_settlement_batch_v1_rejects_pre_season_start_timestamp() {
     let base = unique_integration_fixture_set();
     let fixtures = with_payload(&base, |payload| {
-        payload.first_battle_ts = base.character.character_creation_ts - 1;
-        payload.last_battle_ts = base.character.character_creation_ts;
+        payload.first_battle_ts = base.season.season_start_ts - 1;
+        payload.last_battle_ts = base.season.season_start_ts;
     });
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
@@ -186,11 +186,11 @@ fn test_apply_battle_settlement_batch_v1_rejects_pre_character_timestamp() {
     let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
-        .expect_err("pre-character timestamp should fail");
+        .expect_err("pre-season-start timestamp should fail");
 
     assert_err_contains(
         err,
-        "The first battle timestamp predates character creation",
+        "The settlement season window or grace window is closed",
     );
 }
 
@@ -201,7 +201,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_throughput_boundary() {
         &with_season(
             &base,
             base.batch.payload.season_id,
-            base.character.character_creation_ts.saturating_sub(60),
+            base.season.season_start_ts,
             base.character.character_creation_ts + 300,
             current_unix_timestamp() + 3_600,
         ),
@@ -209,7 +209,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_throughput_boundary() {
             payload.start_nonce = 1;
             payload.end_nonce = 21;
             payload.battle_count = 21;
-            payload.first_battle_ts = base.character.character_creation_ts + 60;
+            payload.first_battle_ts = base.season.season_start_ts + 120;
             payload.last_battle_ts = payload.first_battle_ts + 60;
             payload.end_state_hash = hashv(&[b"slice3_throughput_pass"]).to_bytes();
             payload.encounter_histogram = vec![EncounterCountEntryFixture {
@@ -241,7 +241,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_throughput_overflow() {
         &with_season(
             &base,
             base.batch.payload.season_id,
-            base.character.character_creation_ts.saturating_sub(60),
+            base.season.season_start_ts,
             base.character.character_creation_ts + 300,
             current_unix_timestamp() + 3_600,
         ),
@@ -249,7 +249,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_throughput_overflow() {
             payload.start_nonce = 1;
             payload.end_nonce = 22;
             payload.battle_count = 22;
-            payload.first_battle_ts = base.character.character_creation_ts + 60;
+            payload.first_battle_ts = base.season.season_start_ts + 120;
             payload.last_battle_ts = payload.first_battle_ts + 60;
             payload.end_state_hash = hashv(&[b"slice3_throughput_fail"]).to_bytes();
             payload.encounter_histogram = vec![EncounterCountEntryFixture {

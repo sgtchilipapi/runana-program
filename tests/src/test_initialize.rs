@@ -147,7 +147,7 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
 }
 
 #[test]
-fn test_create_character_persists_historical_character_creation_timestamp() {
+fn test_create_character_stores_metadata_timestamp_and_season_cursor_floor() {
     let fixtures = unique_integration_fixture_set();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
@@ -183,17 +183,17 @@ fn test_create_character_persists_historical_character_creation_timestamp() {
 
     assert!(
         season_policy.season_start_ts <= character_root.character_creation_ts
-            && character_root.character_creation_ts <= season_policy.season_end_ts
+            && character_root.character_creation_ts <= current_unix_timestamp()
     );
     assert_eq!(
         cursor.last_committed_battle_ts,
-        character_root.character_creation_ts
+        season_policy.season_start_ts
     );
     assert_eq!(cursor.last_committed_season_id, season_policy.season_id);
 }
 
 #[test]
-fn test_create_character_rejects_closed_season_window() {
+fn test_create_character_clamps_metadata_timestamp_to_season_floor() {
     let now = current_unix_timestamp();
     let mut fixtures = unique_integration_fixture_set();
     fixtures.season.season_start_ts = now.saturating_add(3_600);
@@ -204,14 +204,34 @@ fn test_create_character_rejects_closed_season_window() {
         .bootstrap_slice1_static_fixture_state(&fixtures)
         .expect("static fixture state should bootstrap");
 
-    let err = harness
+    let tx = harness
         .submit_create_character_with_player_payer(&fixtures)
-        .expect_err("creation outside active season window should fail");
+        .expect("creation outside the active battle window should still succeed");
 
-    assert!(
-        err.to_string()
-            .contains("The settlement season window or grace window is closed"),
-        "unexpected error: {err}"
+    harness
+        .assert_signature_confirmed(&tx)
+        .expect("character creation transaction should be confirmed");
+
+    let character_root = harness
+        .fetch_anchor_account::<runana_program::CharacterRootAccount>(
+            fixtures.character.character_root_pubkey,
+        )
+        .expect("character root fetch should succeed")
+        .expect("character root should exist after creation");
+    let cursor = harness
+        .fetch_anchor_account::<runana_program::CharacterSettlementBatchCursorAccount>(
+            fixtures.character.character_settlement_batch_cursor_pubkey,
+        )
+        .expect("cursor fetch should succeed")
+        .expect("cursor should exist after creation");
+
+    assert_eq!(
+        character_root.character_creation_ts,
+        fixtures.season.season_start_ts
+    );
+    assert_eq!(
+        cursor.last_committed_battle_ts,
+        fixtures.season.season_start_ts
     );
 }
 

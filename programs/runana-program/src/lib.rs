@@ -154,11 +154,8 @@ pub mod runana_program {
                     <= ctx.accounts.season_policy.commit_grace_end_ts,
             SettlementError::InvalidSeasonPolicy
         );
-        require!(
-            ctx.accounts.season_policy.season_start_ts <= character_creation_ts
-                && character_creation_ts <= ctx.accounts.season_policy.season_end_ts,
-            SettlementError::SeasonWindowClosed
-        );
+        let creation_metadata_ts =
+            character_creation_ts.max(ctx.accounts.season_policy.season_start_ts);
 
         let initial_page_index = args.initial_unlocked_zone_id / ZONE_PAGE_WIDTH;
         require!(
@@ -174,7 +171,7 @@ pub mod runana_program {
         character_root.bump = ctx.bumps.character_root;
         character_root.authority = ctx.accounts.authority.key();
         character_root.character_id = args.character_id;
-        character_root.character_creation_ts = character_creation_ts;
+        character_root.character_creation_ts = creation_metadata_ts;
 
         let character_stats = &mut ctx.accounts.character_stats;
         character_stats.version = ACCOUNT_VERSION_V1;
@@ -206,7 +203,7 @@ pub mod runana_program {
         cursor.last_committed_end_nonce = 0;
         cursor.last_committed_state_hash = genesis_state_hash;
         cursor.last_committed_batch_id = 0;
-        cursor.last_committed_battle_ts = character_creation_ts;
+        cursor.last_committed_battle_ts = ctx.accounts.season_policy.season_start_ts;
         cursor.last_committed_season_id = ctx.accounts.season_policy.season_id;
         cursor.updated_at_slot = clock.slot;
 
@@ -1825,7 +1822,7 @@ fn verify_batch_continuity(
 }
 
 fn verify_time_season_and_throughput(
-    character_root: &CharacterRootAccount,
+    _character_root: &CharacterRootAccount,
     cursor: &CharacterSettlementBatchCursorAccount,
     season_policy: &SeasonPolicyAccount,
     payload: &SettlementBatchPayloadV1,
@@ -1838,10 +1835,6 @@ fn verify_time_season_and_throughput(
         season_policy.season_start_ts < season_policy.season_end_ts
             && season_policy.season_end_ts <= season_policy.commit_grace_end_ts,
         SettlementError::InvalidSeasonPolicy
-    );
-    require!(
-        payload.first_battle_ts >= character_root.character_creation_ts,
-        SettlementError::PreCharacterTimestamp
     );
     require!(
         payload.first_battle_ts >= cursor.last_committed_battle_ts,
@@ -2249,8 +2242,6 @@ pub enum SettlementError {
     EncounterZoneMismatch,
     #[msg("The encounter histogram enemy does not match the provided enemy registry")]
     EncounterEnemyMismatch,
-    #[msg("The first battle timestamp predates character creation")]
-    PreCharacterTimestamp,
     #[msg("Battle timestamps must be monotonic and non-regressing")]
     BattleTimestampRegression,
     #[msg("The settlement season id must be monotonic")]

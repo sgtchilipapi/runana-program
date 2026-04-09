@@ -162,7 +162,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     let relayer = canonical_relayer_keypair().pubkey();
     let mut character_id = *b"char_fixture_000";
     character_id[8..16].copy_from_slice(&discriminator.to_le_bytes());
-    let character_creation_ts = 1_720_000_000;
+    let character_creation_ts: u64 = 1_720_000_000;
     let season_id_at_creation = 1_u32.saturating_add((discriminator as u32) & 0x3fff_ffff);
     let unique_registry_offset = discriminator.saturating_sub(1) as u16;
     let zone_id: u16 = if discriminator == 0 {
@@ -221,7 +221,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         last_committed_end_nonce: 0,
         last_committed_state_hash,
         last_committed_batch_id: 0,
-        last_committed_battle_ts: character_creation_ts,
+        last_committed_battle_ts: character_creation_ts.saturating_sub(60),
         last_committed_season_id: season_id_at_creation,
     };
 
@@ -477,8 +477,8 @@ fn rebuild_fixture_timestamps(
     character_creation_ts: u64,
 ) -> CanonicalFixtureSet {
     fixtures.character.character_creation_ts = character_creation_ts;
-    fixtures.character.cursor.last_committed_battle_ts = character_creation_ts;
     fixtures.season.season_start_ts = character_creation_ts.saturating_sub(60);
+    fixtures.character.cursor.last_committed_battle_ts = fixtures.season.season_start_ts;
     fixtures.season.season_end_ts = character_creation_ts.saturating_add(86_400);
     fixtures.batch.payload.first_battle_ts = character_creation_ts.saturating_add(60);
     fixtures.batch.payload.last_battle_ts = character_creation_ts.saturating_add(180);
