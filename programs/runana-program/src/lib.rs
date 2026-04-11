@@ -250,7 +250,7 @@ pub mod runana_program {
             &ctx.accounts.character_settlement_batch_cursor,
             &args.payload,
         )?;
-        verify_ed25519_preinstructions(&ctx, &args.payload)?;
+        verify_server_attestation_preinstruction(&ctx, &args.payload)?;
         verify_time_season_and_throughput(
             &ctx.accounts.character_root,
             &ctx.accounts.character_settlement_batch_cursor,
@@ -536,8 +536,7 @@ pub struct InitializeCharacterZoneProgressPage<'info> {
 
 #[derive(Accounts)]
 pub struct ApplyBattleSettlementBatchV1<'info> {
-    /// CHECK: settlement permit subject; verified via ed25519 permit contents and character ownership.
-    pub player_authority: UncheckedAccount<'info>,
+    pub player_authority: Signer<'info>,
     /// CHECK: sysvar instructions account is validated by address and parsed at runtime.
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -1403,7 +1402,7 @@ fn accumulate_page_summary_bounds(
     Ok(())
 }
 
-fn verify_ed25519_preinstructions(
+fn verify_server_attestation_preinstruction(
     ctx: &Context<ApplyBattleSettlementBatchV1>,
     payload: &SettlementBatchPayloadV1,
 ) -> Result<()> {
@@ -1413,22 +1412,15 @@ fn verify_ed25519_preinstructions(
         as usize;
 
     require!(
-        current_index >= 2,
+        current_index >= 1,
         SettlementError::MissingEd25519Preinstructions
     );
 
-    let server_ix = load_instruction_at_checked(current_index - 2, &instructions_sysvar)
-        .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
-    let player_ix = load_instruction_at_checked(current_index - 1, &instructions_sysvar)
+    let server_ix = load_instruction_at_checked(current_index - 1, &instructions_sysvar)
         .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
 
     require_keys_eq!(
         server_ix.program_id,
-        ed25519_program::ID,
-        SettlementError::InvalidEd25519InstructionOrder
-    );
-    require_keys_eq!(
-        player_ix.program_id,
         ed25519_program::ID,
         SettlementError::InvalidEd25519InstructionOrder
     );
@@ -1439,39 +1431,15 @@ fn verify_ed25519_preinstructions(
         ctx.accounts.character_root.key(),
         payload,
     );
-    let expected_player_message = canonical_player_authorization_message(
-        ctx.program_id,
-        CLUSTER_ID_LOCALNET,
-        ctx.accounts.player_authority.key(),
-        ctx.accounts.character_root.key(),
-        payload.batch_hash,
-        payload.batch_id,
-        payload.signature_scheme,
-    )?;
 
     let server_ix_payload = parse_ed25519_instruction_payload(&server_ix.data)?;
-    let player_ix_payload = parse_ed25519_instruction_payload(&player_ix.data)?;
     let expected_server_signer = ctx.accounts.program_config.trusted_server_signer;
-    let expected_player_signer = ctx.accounts.player_authority.key();
 
     let server_signer_matches = server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
-    let player_signer_matches = player_ix_payload.signer_pubkey == expected_player_signer.as_ref();
-
-    if !server_signer_matches
-        && !player_signer_matches
-        && server_ix_payload.signer_pubkey == expected_player_signer.as_ref()
-        && player_ix_payload.signer_pubkey == expected_server_signer.as_ref()
-    {
-        return err!(SettlementError::InvalidEd25519InstructionOrder);
-    }
 
     require!(
         server_signer_matches && server_ix_payload.message == expected_server_message.as_slice(),
         SettlementError::ServerAttestationMismatch
-    );
-    require!(
-        player_signer_matches && player_ix_payload.message == expected_player_message.as_slice(),
-        SettlementError::PlayerAuthorizationMismatch
     );
 
     Ok(())
@@ -2134,15 +2102,15 @@ pub enum SettlementError {
     SettlementPaused,
     #[msg("The instructions sysvar account could not be parsed")]
     InvalidInstructionsSysvar,
-    #[msg("Two ed25519 verification instructions must precede the settlement instruction")]
+    #[msg("One ed25519 verification instruction must precede the settlement instruction")]
     MissingEd25519Preinstructions,
-    #[msg("The settlement instruction must be preceded by two ed25519 instructions in order")]
+    #[msg("The settlement instruction must be preceded by the trusted server ed25519 instruction")]
     InvalidEd25519InstructionOrder,
     #[msg("The ed25519 verification instruction data does not match the canonical shape")]
     InvalidEd25519InstructionData,
     #[msg("The trusted server attestation contents do not match the settlement payload")]
     ServerAttestationMismatch,
-    #[msg("The player authorization contents do not match the settlement payload")]
+    #[msg("The player transaction signer does not match the character authority")]
     PlayerAuthorizationMismatch,
     #[msg("The settlement payload uses an unsupported signature scheme")]
     UnsupportedSignatureScheme,
