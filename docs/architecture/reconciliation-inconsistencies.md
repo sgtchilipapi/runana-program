@@ -4,103 +4,99 @@
 
 This document compares the revised MVP target in [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L1) against:
 
-- the current on-chain implementation
-- the current local documentation in this checkout
-- the referenced but currently missing SSOT and settlement-plan docs
+- the current on-chain implementation in `runana-program`
+- the current local implementation notes in [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L1)
+- the actual project SSOT in `keep-pushing`
+- the actual existing zone-run execution and settlement plan in `keep-pushing`
+- the current deferred-settlement API spec in `keep-pushing`
 
-For each inconsistency, it proposes explicit reconciliation choices and a recommended path.
+For each inconsistency, this report gives reconciliation choices and a recommended direction.
 
 ## Compared Artifacts
 
-### Present In This Checkout
+### Revised MVP Spec
 
 - [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L1)
+
+### Current Program Repo
+
 - [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L1)
 - [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L1)
-- integration tests under `tests/src`
 
-### Referenced But Missing In This Checkout
+### Multi-Root Workspace Docs In `keep-pushing`
 
-- `docs/architecture/SSOT.md`
-- `solana-zone-run-execution-and-settlement-plan.md`
+- [SSOT.md](/home/paps/projects/keep-pushing/docs/architecture/SSOT.md)
+- [solana-zone-run-execution-and-settlement-plan.md](/home/paps/projects/keep-pushing/docs/architecture/solana/solana-zone-run-execution-and-settlement-plan.md)
+- [deferred-settlement-api-spec.md](/home/paps/projects/keep-pushing/docs/api/deferred-settlement-api-spec.md)
 
 ## Highest-Level Finding
 
-The revised MVP spec is no longer a small additive layer over the current implementation. It is a deliberate product-and-protocol revision. The largest mismatches are:
+The revised MVP doc and the existing `keep-pushing` docs agree on some foundational principles:
 
-1. source-of-truth docs are missing locally
-2. settlement player authorization model differs
-3. character/account schema differs
-4. class system is absent
-5. anon/server account model is absent
-6. grace-period gameplay intent conflicts with current season-window validation
+- server-side combat authority
+- on-chain bounded-legality validation rather than exact-path cryptographic truth
+- player-owned Solana actions funded by the player wallet
+- season/grace semantics where delayed submission is allowed but prior-season progress can expire
 
----
+But they diverge sharply on four large areas:
 
-## 1. Missing SSOT And Settlement Plan Docs
+1. gameplay model
+   - `keep-pushing` canonical direction is run-native zone traversal
+   - revised MVP doc still describes a simpler run/result flow without adopting the full run-native sealing model
+2. settlement transport
+   - existing API spec is server-prepared opaque transaction, two-phase authorize -> sign_transaction -> submit
+   - revised MVP wants client-built, client-submitted, one-prompt settlement
+3. local-first onboarding model
+   - existing API spec is local-first character creation and first-sync atomic chain bootstrap
+   - revised MVP now treats anon users as real server-backed users immediately and pushes more identity/value on-chain earlier
+4. batching unit
+   - zone-run plan says settlement unit is a whole closed run and runs are never split
+   - current on-chain program is battle-native
+   - revised MVP doc does not yet fully adopt the whole-closed-run settlement unit
 
-### Current State
+The most important reconciliation question is:
 
-This checkout does not contain the two docs the project keeps referring to:
-
-- `docs/architecture/SSOT.md`
-- `solana-zone-run-execution-and-settlement-plan.md`
-
-### Why This Matters
-
-- We cannot do a real line-by-line reconciliation against the intended prior plan
-- The new gap-analysis is currently acting as the temporary de facto product spec
-- Any “compare to SSOT/plan” claim would be incomplete until those docs are restored
-
-### Reconciliation Choices
-
-- `Option A`: Restore the missing docs into this repo, then do a second-pass reconciliation
-- `Option B`: Treat the new gap-analysis as the temporary SSOT until the old docs are recovered
-- `Option C`: Recreate the missing docs from memory/other repos and then reconcile
-
-### Recommendation
-
-- `Recommended`: `Option A` if those files exist elsewhere
-- `Fallback`: `Option B` if those docs are no longer authoritative
+- do we preserve the existing `keep-pushing` run-native + first-sync architecture and revise the new MVP doc back toward it,
+- or do we deliberately replace that architecture with the revised MVP direction and update the old docs accordingly?
 
 ---
 
-## 2. Settlement Player Authorization Model Mismatch
+## 1. SSOT Trust Model vs Revised MVP Settlement UX
 
-### Current Implementation
+### SSOT
 
-The current settlement flow validates:
+The SSOT says:
 
-- server attestation via ed25519 pre-instruction
-- player authorization via a separate signed-message permit
+- all combat simulation is server-side only
+- EXP claims are never direct server/client inputs
+- player-owned on-chain actions are funded by the player wallet
+- server may prepare and broadcast player-signed transactions
+- broadcast origin is not an on-chain validity condition
 
-Evidence:
+Source:
 
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L227)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L1382)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L2067)
-- [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L54)
+- [SSOT.md](/home/paps/projects/keep-pushing/docs/architecture/SSOT.md)
 
-### Revised MVP Spec
+### Revised MVP Doc
 
-The revised MVP requires:
+The revised MVP says:
 
-- server attestation remains
-- player signed-message permit is removed
-- player becomes a real transaction signer
-- client builds and submits the transaction
-- one Phantom approval target for settlement
+- settlement remains server-attested
+- player becomes the real transaction signer
+- settlement should be client-built and client-submitted for Phantom UX
+- one Phantom approval is the target
 
-Evidence:
+### Inconsistency
 
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L106)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L752)
+This is not a hard contradiction.
+
+The SSOT allows server-prepared or server-broadcast transactions, while the revised MVP prefers client-built/client-submitted transactions. The real difference is implementation preference, not trust-model incompatibility.
 
 ### Reconciliation Choices
 
-- `Option A`: Keep current dual-auth model and revise the MVP doc back toward two prompts
-- `Option B`: Change the program to keep server attestation but replace player permit with signer validation
-- `Option C`: Support both paths temporarily
+- `Option A`: Keep SSOT trust model and allow both client-submit and server-broadcast operationally
+- `Option B`: Tighten SSOT to explicitly prefer client-built/client-submitted settlement for MVP UX
+- `Option C`: Revise the MVP doc back toward server-prepared opaque transactions
 
 ### Recommendation
 
@@ -108,51 +104,184 @@ Evidence:
 
 Why:
 
-- it matches the desired wallet UX
-- it preserves server-side settlement attestation
-- it removes the extra player message prompt
+- it keeps the SSOT security model intact
+- it aligns the spec with the one-approval Phantom UX goal
 
 ---
 
-## 3. Character Root Schema Mismatch
+## 2. Existing Deferred-Settlement API Spec vs Revised MVP Settlement Flow
 
-### Current Implementation
+### Existing API Spec
 
-`CharacterRootAccount` stores:
+The current API spec in `keep-pushing` describes:
 
-- authority
-- character id
-- character creation timestamp
+- anonymous user creation via `POST /api/auth/anon`
+- local-first backend character creation via `POST /api/character/create`
+- real combat persistence before chain existence
+- atomic first sync:
+  - prepare authorize phase
+  - player signs authorization message
+  - prepare sign-transaction phase
+  - server returns opaque `preparedTransaction`
+  - wallet signs prepared transaction
+  - backend submit endpoint broadcasts and reconciles
+- later settlement mirrors the same authorize -> sign_transaction -> submit pattern
 
-It does not store:
+Source:
 
-- name
-- class id
+- [deferred-settlement-api-spec.md](/home/paps/projects/keep-pushing/docs/api/deferred-settlement-api-spec.md)
 
-`CreateCharacterArgs` currently includes only:
+### Revised MVP Doc
 
-- `character_id`
-- `initial_unlocked_zone_id`
+The revised MVP says:
 
-Evidence:
+- no separate player signed-message permit
+- client prepares settlement locally from structured server data
+- client submits transaction directly
+- client then acknowledges `txid`
+- settlement should be one Phantom approval
 
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L574)
+### Inconsistency
+
+This is a hard architecture divergence.
+
+The current API spec is built around:
+
+- opaque server-prepared transactions
+- player signed-message permits
+- backend submit endpoints
+
+The revised MVP is built around:
+
+- structured prepare data
+- signer-based player auth
+- client-side submission
+- ack endpoint instead of submit endpoint
+
+### Reconciliation Choices
+
+- `Option A`: Keep the existing deferred-settlement API architecture and revise the MVP doc
+- `Option B`: Replace the current API spec with the revised MVP settlement architecture
+- `Option C`: Support both flows temporarily
+
+### Recommendation
+
+- `Recommended`: `Option B`
+
+Why:
+
+- it directly addresses the reported Phantom UX problem
+- it removes the second player authorization prompt
+- it keeps server attestation while simplifying player interaction
+
+### Required Doc Follow-Up
+
+If `Option B` is chosen, these `keep-pushing` docs must be revised:
+
+- [deferred-settlement-api-spec.md](/home/paps/projects/keep-pushing/docs/api/deferred-settlement-api-spec.md)
+- any backend plan that assumes `preparedTransaction` opaque relay submission
+
+---
+
+## 3. First-Sync Local-First Model vs Revised MVP Account Model
+
+### Existing API Spec
+
+Current spec says:
+
+- create backend-only anon user
+- create backend-only playable character immediately
+- play local battles immediately
+- later perform atomic first sync that creates chain character and settles batch 1
+
+### Revised MVP Doc
+
+Revised MVP says:
+
+- anon users are real server-backed users from first open
+- anon users can have 1 character
+- wallet-linked users can have 3 characters
+- anon-to-wallet conversion upgrades the same user
+- name and class should be on-chain identity fields
+
+### Inconsistency
+
+These models overlap in spirit but differ in emphasis:
+
+- existing spec centers local-first gameplay before chain identity
+- revised MVP centers unified server account identity plus earlier chain-oriented character identity
+
+The largest concrete mismatch is onboarding shape:
+
+- existing spec uses one backend character with chain status `NOT_STARTED`
+- revised MVP uses anon/wallet-linked account mode and formal slot semantics
+
+### Reconciliation Choices
+
+- `Option A`: Preserve current local-first-first-sync model and revise the new MVP doc to fit it
+- `Option B`: Keep local-first play, but adopt the revised account model and slot semantics on top of it
+- `Option C`: Remove the local-first-first-sync architecture and push chain-oriented creation earlier
+
+### Recommendation
+
+- `Recommended`: `Option B`
+
+Why:
+
+- it preserves the strongest part of the current app direction: immediate play
+- it still allows the revised account/slot model to exist cleanly
+
+Practical interpretation:
+
+- anon users are real server users
+- they still get immediate backend-playable characters
+- wallet conversion becomes the chain bootstrap point
+
+---
+
+## 4. Run-Native Settlement Unit vs Revised MVP Batch Model
+
+### Zone-Run Plan
+
+The zone-run plan is explicit:
+
+- settlement unit is a closed settleable run, not an individual battle
+- batches contain contiguous ranges of settleable closed runs
+- no run may ever be split across two batches
+- zero-value runs do not enter settlement continuity
+
+Source:
+
+- [solana-zone-run-execution-and-settlement-plan.md](/home/paps/projects/keep-pushing/docs/architecture/solana/solana-zone-run-execution-and-settlement-plan.md)
+
+### Current Program
+
+The current on-chain implementation is battle-native:
+
+- `battle_count`
+- `start_nonce` / `end_nonce`
+- encounter histogram at batch level
+- zone progress delta at batch level
+
+Source:
+
 - [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L736)
 
-### Revised MVP Spec
+### Revised MVP Doc
 
-The revised MVP requires `name` and `classId` on-chain in the root account.
+The revised MVP talks about runs, run ids, and batching, but it still references the current battle-native program and does not yet fully rewrite the settlement payload around closed-run summaries.
 
-Evidence:
+### Inconsistency
 
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L77)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L393)
+This is the biggest architecture mismatch after the player-auth change.
+
+The revised MVP doc and the zone-run plan are not yet fully aligned on the settlement unit. The zone-run plan is much more specific and should win unless deliberately superseded.
 
 ### Reconciliation Choices
 
-- `Option A`: Keep metadata off-chain and revise the MVP doc
-- `Option B`: Expand `CharacterRootAccount` and `CreateCharacterArgs`
-- `Option C`: Add a separate metadata PDA instead
+- `Option A`: Keep battle-native settlement and revise the zone-run plan back
+- `Option B`: Adopt the zone-run plan fully and update the MVP doc to closed-run-native settlement
+- `Option C`: Ship an interim battle-native MVP and plan a later run-native migration
 
 ### Recommendation
 
@@ -160,425 +289,382 @@ Evidence:
 
 Why:
 
-- it matches the revised MVP decisions already locked
-- it keeps create atomic
-- it avoids a second PDA dependency for basic identity
+- the zone-run plan is marked design-locked and canonical for that workstream
+- the revised MVP doc should be updated to explicitly adopt closed-run summaries, zero-value run rules, and no-run-splitting
 
 ---
 
-## 4. Class System Missing
+## 5. Gameplay API Family Mismatch
 
-### Current Implementation
+### Zone-Run Plan
 
-There is no class registry or class PDA model today.
+Canonical gameplay API family is:
 
-Existing registries are only:
+- `POST /api/zone-runs/start`
+- `GET /api/zone-runs/active`
+- `POST /api/zone-runs/choose-branch`
+- `POST /api/zone-runs/advance`
+- `POST /api/zone-runs/use-skill`
+- `POST /api/zone-runs/continue`
+- `POST /api/zone-runs/abandon`
 
-- zone registry
-- zone enemy set
-- enemy archetype registry
-- season policy
+The current direct encounter route may remain only as sandbox/testing behavior.
 
-Evidence:
+### Revised MVP Doc
 
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L337)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L360)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L402)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L425)
+The revised MVP still uses generalized routes like:
 
-### Revised MVP Spec
+- `POST /api/runs`
+- `GET /api/runs/:runId`
 
-The revised MVP requires:
+and does not fully describe the canonical mutating run action family.
 
-- one PDA per class
-- `classId`
-- `enabled`
-- admin-controlled enablement
+### Inconsistency
 
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L84)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L542)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L975)
+This is a real contract mismatch between the canonical zone-run workstream and the new doc’s simplified route examples.
 
 ### Reconciliation Choices
 
-- `Option A`: Keep launch classes entirely off-chain
-- `Option B`: Add class PDAs now
-- `Option C`: Hardcode classes in the program and skip class accounts for MVP
+- `Option A`: Keep the simplified `/api/runs` family and revise the zone-run plan
+- `Option B`: Update the MVP doc to use the canonical `/api/zone-runs/*` action family
+- `Option C`: Keep `/api/runs` as a read/result/share family while using `/api/zone-runs/*` for execution
 
 ### Recommendation
 
-- `Recommended`: `Option B`
+- `Recommended`: `Option C`
 
 Why:
 
-- it matches the locked MVP decision
-- it gives admin control without overloading `CharacterRootAccount`
+- it preserves the richer canonical zone-run action model
+- it still allows stable run-id-based result/share pages
 
 ---
 
-## 5. Level Progression Logic Mismatch
+## 6. Topology Visibility Agreement vs Presentation Detail
 
-### Current Implementation
+### Zone-Run Plan
 
-Settlement currently updates only:
+The player sees:
 
-- `total_exp`
-- cursor
-- zone/world progress
+- current node
+- legal next branches
+- not the full future graph
 
-It does not update `level` from EXP.
+Topology visibility is adjacent-only.
 
-Evidence:
+### Revised MVP Doc
 
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L294)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L587)
+The revised MVP says:
 
-### Revised MVP Spec
+- preserve the existing zone run flow
+- presentation-only local window
+- previous/current/immediate-next context
+- local-window stepper
 
-The revised MVP expects:
+### Inconsistency
 
-- EXP-to-level conversion on-chain
-- progression tables as program constants
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L97)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L960)
+This is mostly compatible, but the revised MVP adds a “previous node” presentation concept that the zone-run plan does not discuss.
 
 ### Reconciliation Choices
 
-- `Option A`: Leave level static for MVP and revise the doc
-- `Option B`: Add on-chain level derivation during settlement
-- `Option C`: Keep EXP on-chain and derive displayed level only off-chain
+- `Option A`: Treat previous-node visibility as harmless presentation detail
+- `Option B`: Remove previous-node wording from the MVP doc and use strict adjacent-only language
+- `Option C`: Update the zone-run plan to mention previous-node context as allowed presentation
 
 ### Recommendation
 
-- `Recommended`: `Option B`
+- `Recommended`: `Option A`
+
+This is a cosmetic/spec wording difference, not a logic conflict.
 
 ---
 
-## 6. Slot Authority Mismatch
+## 7. Grace-Period Gameplay Semantics Conflict
 
-### Current Implementation
+### SSOT
 
-The on-chain program does not enforce:
+SSOT canonical settlement dictionary says:
 
-- anon 1-slot limit
-- wallet 3-slot limit
-- slot index assignment
+- delayed submission is valid
+- prior-season uncommitted progress expires after grace
+- commit within grace or lose uncommitted prior-season progress
 
-Character PDA derivation is generic by `(authority, character_id)`.
+### Current Program
 
-Evidence:
+Current chain validation enforces:
 
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L463)
+- `last_battle_ts <= season_end_ts`
+- submission time must still be within `commit_grace_end_ts`
 
-### Revised MVP Spec
+### Revised MVP Discussion
 
-- anon users: exactly 1 slot
-- wallet-linked users: exactly 3 slots
-- slot assignment is server-only
+The revised MVP notes a mismatch if product expects normal play to continue during grace.
 
-Evidence:
+### Zone-Run Plan
 
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L56)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L263)
+The zone-run plan says:
+
+- a run is bound to the season active at run start
+- it may not continue once that season's playable window closes
+- season-cutoff closure is treated like abandon for settlement semantics
+
+### Inconsistency
+
+The zone-run plan and current chain behavior align well: grace is for settlement delay, not for continued normal seasonal play.
+
+The only inconsistency comes from the product desire expressed during planning that “same as normal” gameplay might continue during grace.
 
 ### Reconciliation Choices
 
-- `Option A`: Move slot semantics on-chain
-- `Option B`: Keep slot semantics server-only
-- `Option C`: Let the client infer slot order
+- `Option A`: Freeze grace as sync/closure-only and update product wording
+- `Option B`: Redesign season playable window semantics across backend + chain + docs
+- `Option C`: Allow non-seasonal grace gameplay only
 
 ### Recommendation
 
-- `Recommended`: `Option B`
+- `Recommended`: `Option A`
 
-Reason:
-
-- this is already the locked MVP decision
-- no current chain design depends on slot semantics
+This now has a stronger recommendation than before, because SSOT and the zone-run plan both support it.
 
 ---
 
-## 7. Anon User Model Missing
+## 8. Player Fee-Payer Rule vs Client Submit UX
 
-### Current Implementation
+### SSOT
 
-There is no anon user/account/session model in this repo.
+SSOT says:
 
-### Revised MVP Spec
+- player-owned on-chain actions are funded by the player wallet
 
-- first open auto-creates anon server-backed user
-- anon users are real users
-- anon and wallet-linked users share the same session model
-- wallet linking upgrades the same user identity in the normal case
+### Current Program
 
-Evidence:
+Current `create_character` enforces:
 
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L56)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L233)
+- payer must equal authority
+
+Current settlement does not check fee payer.
+
+### Revised MVP Doc
+
+The revised MVP also assumes:
+
+- wallet-backed create uses player wallet
+- settlement is client-submitted and player-signed
+
+### Inconsistency
+
+No meaningful inconsistency here.
+
+The only difference is operational preference:
+
+- create must remain player-funded
+- settlement may be client-submitted while still satisfying the SSOT trust model
 
 ### Reconciliation Choices
 
-- `Option A`: Make anon local-only again
-- `Option B`: Implement full server-backed anon account model
-- `Option C`: Hybrid local-first with delayed server user creation
+- `Option A`: Keep as-is
+- `Option B`: Extend settlement to require player fee payer too
 
 ### Recommendation
 
-- `Recommended`: `Option B`
+- `Recommended`: `Option A`
+
+Do not add unnecessary settlement fee-payer restrictions unless product explicitly wants that burden.
 
 ---
 
-## 8. Draft/Finalize Create Model Missing
+## 9. `qs.md` Narrative vs Target Architecture
 
-### Current Implementation
+### Current `qs.md`
 
-There is no server-side create lifecycle today.
-
-### Revised MVP Spec
-
-Requires:
-
-- name reservation
-- class validation
-- create draft
-- create finalize
-- convert draft
-- convert finalize
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L344)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L440)
-
-### Reconciliation Choices
-
-- `Option A`: Client-only create without server drafts
-- `Option B`: Implement the draft/finalize server contract
-- `Option C`: Use drafts for wallet create only, not anon conversion
-
-### Recommendation
-
-- `Recommended`: `Option B`
-
----
-
-## 9. Settlement Batch/Ack Backend Missing
-
-### Current Implementation
-
-No backend exists today for:
-
-- durable batch records
-- attempt records
-- txid acknowledgement
-- retrying failed unresolved batches
-
-### Revised MVP Spec
-
-Requires:
-
-- one explicit batch record per unresolved settlement group
-- multiple attempt records under that batch
-- `prepare`
-- `ack`
-- retry same failed batch
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L752)
-
-### Reconciliation Choices
-
-- `Option A`: Keep settlement as pure stateless request/submit logic
-- `Option B`: Implement durable run -> batch -> attempt backend model
-- `Option C`: Track only per-run sync state and skip batches
-
-### Recommendation
-
-- `Recommended`: `Option B`
-
----
-
-## 10. Share And Public Result Model Missing
-
-### Current Implementation
-
-No share or public result doc/model exists locally.
-
-### Revised MVP Spec
-
-Requires:
-
-- durable server `runId`
-- run-scoped result page
-- public unlisted share page
-- status labels on public pages
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L650)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L710)
-
-### Reconciliation Choices
-
-- `Option A`: Remove share from MVP
-- `Option B`: Implement run records + share generation + public result page
-- `Option C`: Keep share client-only and non-canonical
-
-### Recommendation
-
-- `Recommended`: `Option B`
-
----
-
-## 11. Sync Surface Mismatch
-
-### Current Implementation
-
-No sync UI or sync page exists.
-
-### Revised MVP Spec
-
-- per-character sync page
-- progression-first summary
-- retry sync primary action
-- grace-period risk surfaces on roster, character, and sync page
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L866)
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L905)
-
-### Reconciliation Choices
-
-- `Option A`: Keep sync as purely background/implicit
-- `Option B`: Implement the dedicated sync product surface
-- `Option C`: Put sync details only on the character page
-
-### Recommendation
-
-- `Recommended`: `Option B`
-
----
-
-## 12. Grace-Period Gameplay Semantic Mismatch
-
-### Current Implementation
-
-The current on-chain model enforces:
-
-- battles must occur no later than `season_end_ts`
-- submission must occur no later than `commit_grace_end_ts`
-
-Evidence:
-
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L1824)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L1853)
-- [lib.rs](/home/paps/projects/runana-program/programs/runana-program/src/lib.rs#L1867)
-
-### Revised MVP Spec
-
-The revised doc explicitly notes a mismatch if product intent is “normal gameplay continues during grace.”
-
-Evidence:
-
-- [user-flow-spec-gap-analysis.md](/home/paps/projects/runana-program/docs/architecture/user-flow-spec-gap-analysis.md#L928)
-
-### Reconciliation Choices
-
-- `Option A`: Define grace as sync-only in product behavior
-- `Option B`: Revise the on-chain season-window logic so grace-time play can still count
-- `Option C`: Allow grace-time play, but make those runs non-seasonal/non-settleable
-
-### Recommendation
-
-- `Recommended`: choose explicitly before implementation
-
-Practical default:
-
-- If the goal is lowest risk, choose `Option A`
-- If product strongly wants normal gameplay during grace, choose `Option B`
-
-This is the most important unresolved logic conflict.
-
----
-
-## 13. Current `qs.md` Narrative Is Out Of Date Relative To Revised MVP
-
-### Current Documentation
-
-`qs.md` currently describes the existing chain design accurately, including:
+`qs.md` accurately describes the current implementation, including:
 
 - player-funded character creation
-- settlement auth still using trusted server attestation plus player permit
+- settlement authorization still coming from trusted server attestation plus player permit
 
-Evidence:
+Source:
 
 - [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L54)
 - [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L60)
 
-### Revised MVP Spec
+### Inconsistency
 
-The revised MVP changes settlement auth and character schema assumptions.
+`qs.md` is now out of date relative to the revised MVP target and also out of date relative to the likely future run-native redesign.
 
 ### Reconciliation Choices
 
-- `Option A`: Leave `qs.md` as current-implementation documentation only
-- `Option B`: Update `qs.md` after implementation lands
-- `Option C`: Add an explicit warning to `qs.md` that it documents pre-revision behavior
+- `Option A`: Keep `qs.md` as implementation-only documentation until code changes land
+- `Option B`: Add a warning that it documents the pre-revision protocol
+- `Option C`: Rewrite it now toward the target design
 
 ### Recommendation
 
-- `Recommended`: `Option C` now, then `Option B` when the implementation changes land
+- `Recommended`: `Option B`, then `Option A` until implementation changes
+
+Do not rewrite `qs.md` toward target behavior before the code changes, or it will stop documenting reality.
 
 ---
 
-## 14. Compatibility Strategy Mismatch
+## 10. Existing Deferred-Settlement Status Vocabulary vs Revised MVP Sync Model
+
+### Existing API Spec
+
+Current status vocabulary includes:
+
+- character chain status: `NOT_STARTED`, `PENDING`, `SUBMITTED`, `CONFIRMED`, `FAILED`
+- battle ledger status: `AWAITING_FIRST_SYNC`, `LOCAL_ONLY_ARCHIVED`, `PENDING`, `SEALED`, `COMMITTED`
+- settlement batch status: `SEALED`, `PREPARED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
+
+### Revised MVP Doc
+
+The revised MVP uses:
+
+- player-facing run status: `Pending`, `Synced`, `Expired`
+- batch status: `Prepared`, `Submitted`, `Confirmed`, `Failed`, `Expired`
+
+### Inconsistency
+
+This is mostly naming divergence plus the fact that the current API spec is battle/first-sync-centric while the revised MVP is run/result-centric.
+
+### Reconciliation Choices
+
+- `Option A`: Keep internal statuses as-is and map them to simpler player-facing labels
+- `Option B`: Normalize everything to the new simpler vocabulary
+- `Option C`: Keep battle-first and run-first vocabularies in parallel
+
+### Recommendation
+
+- `Recommended`: `Option A`
+
+Use:
+
+- simple player-facing labels in UI and public docs
+- richer internal statuses in backend workflows
+
+---
+
+## 11. Character Metadata Placement vs Existing API Spec
+
+### Existing API Spec
+
+Current character create endpoint is:
+
+- `POST /api/character/create`
+- request: `{ userId, name? }`
+
+It assumes backend-only local-first character creation and does not model on-chain `classId`.
+
+### Revised MVP Doc
+
+Revised MVP requires:
+
+- `name` and `classId` on-chain
+- slot-aware server drafts/finalize
+
+### Inconsistency
+
+This is a real API and persistence model mismatch.
+
+### Reconciliation Choices
+
+- `Option A`: Keep backend-only character creation and add chain metadata only at first sync
+- `Option B`: Move create/convert flows to the new draft/finalize model and revise the old API spec
+- `Option C`: Add compatibility wrappers around the old endpoints
+
+### Recommendation
+
+- `Recommended`: `Option B`
+
+If `Option B` is chosen, the old `POST /api/character/create` spec should be retired or relabeled as prototype/local-first legacy.
+
+---
+
+## 12. Run History / Share Pages vs Existing Docs
+
+### Existing Zone-Run Plan
+
+The zone-run plan is focused on:
+
+- active run execution
+- closure
+- settlement sealing
+
+It does not define public share pages as a primary architectural concern.
+
+### Revised MVP Doc
+
+The revised MVP adds:
+
+- durable run-scoped result pages
+- public unlisted share pages
+- expired-but-viewable history
+
+### Inconsistency
+
+This is additive, not contradictory.
+
+### Reconciliation Choices
+
+- `Option A`: Treat share/result pages as product-layer additions on top of the run-native plan
+- `Option B`: Remove share from MVP
+
+### Recommendation
+
+- `Recommended`: `Option A`
+
+---
+
+## 13. Compatibility Strategy
 
 ### Current Situation
 
 The revised MVP assumes:
 
-- breaking chain revision is acceptable
-- old dev/test data is disposable
+- breaking revision is acceptable
+- old experimental/test data is disposable
 - same program id can be upgraded
+
+The `keep-pushing` docs do not establish a stronger contrary compatibility requirement.
 
 ### Reconciliation Choices
 
-- `Option A`: Preserve compatibility with current experimental data/accounts
-- `Option B`: Treat current experimental data as disposable and proceed with breaking MVP revision
+- `Option A`: Breaking revision with disposable non-production data
+- `Option B`: Preserve compatibility with current local-first/deferred-settlement artifacts
 
 ### Recommendation
 
-- `Recommended`: `Option B`
+- `Recommended`: `Option A`
 
 ---
 
 ## Recommended Reconciliation Order
 
-1. Recover or confirm the fate of `SSOT.md` and `solana-zone-run-execution-and-settlement-plan.md`
-2. Decide the grace-period gameplay rule explicitly
-3. Revise the settlement plan around:
-   - server attestation retained
-   - player as real signer
-   - client-built/client-submitted transaction
-4. Revise on-chain character schema for `name` and `classId`
-5. Add class PDA design
-6. Define server models for:
-   - users/accounts
-   - character slots
-   - name reservations
-   - runs
-   - settlement batches
-   - settlement attempts
-7. Add sync/share/result surfaces
-8. Update `qs.md` and any restored SSOT/plan docs to match the reconciled design
+1. Accept the multi-root docs in `keep-pushing` as the real prior source docs.
+2. Decide whether the revised MVP is intended to replace the current deferred-settlement API architecture.
+3. If yes, update these `keep-pushing` docs first:
+   - [deferred-settlement-api-spec.md](/home/paps/projects/keep-pushing/docs/api/deferred-settlement-api-spec.md)
+   - [SSOT.md](/home/paps/projects/keep-pushing/docs/architecture/SSOT.md) only if you want to explicitly prefer client submission
+4. Update the revised MVP doc to fully adopt the zone-run plan’s closed-run settlement unit and `/api/zone-runs/*` execution family.
+5. Keep grace as sync/closure-only unless you intentionally redesign the season model across backend and chain.
+6. Revise the on-chain program around:
+   - signer-based player auth
+   - root metadata fields
+   - class PDAs
+   - on-chain EXP-to-level derivation
+   - eventually run-native payload redesign
+7. After implementation starts, update [qs.md](/home/paps/projects/runana-program/programs/runana-program/src/qs.md#L1) with a warning that it documents pre-revision behavior.
 
 ## Bottom Line
 
-Most inconsistencies are straightforward “current implementation is behind the revised MVP.” The one inconsistency that cannot be safely papered over is the grace-period gameplay semantic conflict. Everything else can proceed once the project accepts the revised MVP as the new target. That grace rule must be reconciled before finalizing the settlement plan.
+After comparing against the real SSOT and zone-run docs in `keep-pushing`, the situation is clearer:
+
+- the revised MVP doc is directionally compatible with the SSOT trust model
+- it is not yet fully compatible with the current deferred-settlement API architecture
+- it is not yet fully compatible with the run-native settlement unit described in the canonical zone-run plan
+
+The recommended reconciliation is:
+
+1. keep the SSOT security model,
+2. keep the run-native zone-run direction,
+3. replace the old two-phase opaque prepared-transaction settlement UX with the revised one-prompt signer-based player flow,
+4. update both the new gap-analysis and the old `keep-pushing` docs to meet in that reconciled middle.
