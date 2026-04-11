@@ -20,6 +20,7 @@ const CHARACTER_ZONE_PROGRESS_SEED: &[u8] = b"character_zone_progress";
 const CHARACTER_BATCH_CURSOR_SEED: &[u8] = b"character_batch_cursor";
 const ZONE_REGISTRY_SEED: &[u8] = b"zone_registry";
 const ZONE_ENEMY_SET_SEED: &[u8] = b"zone_enemy_set";
+const CLASS_REGISTRY_SEED: &[u8] = b"class_registry";
 const ENEMY_ARCHETYPE_SEED: &[u8] = b"enemy_archetype";
 const SEASON_POLICY_SEED: &[u8] = b"season_policy";
 
@@ -29,7 +30,14 @@ const ZONE_STATE_UNLOCKED: u8 = 1;
 const ZONE_STATE_CLEARED: u8 = 2;
 const ZONE_PAGE_WIDTH: u16 = 256;
 const THROUGHPUT_CAP_PER_MINUTE: u64 = 20;
-const MAX_ZONE_ENEMY_SET_MEMBERS: usize = 64;
+const MAX_ZONE_ENEMY_RULES: usize = 64;
+const MAX_CHARACTER_NAME_LEN: usize = 16;
+const EXP_PER_LEVEL: u64 = 100;
+const TERMINAL_STATUS_COMPLETED: u8 = 1;
+const TERMINAL_STATUS_FAILED: u8 = 2;
+const TERMINAL_STATUS_ABANDONED: u8 = 3;
+const TERMINAL_STATUS_EXPIRED: u8 = 4;
+const TERMINAL_STATUS_SEASON_CUTOFF: u8 = 5;
 
 const ED25519_SIGNATURE_COUNT_OFFSET: usize = 0;
 const ED25519_OFFSETS_START: usize = 2;
@@ -53,6 +61,7 @@ pub mod runana_program {
         config.trusted_server_signer = args.trusted_server_signer;
         config.settlement_paused = args.settlement_paused;
         config.max_battles_per_batch = args.max_battles_per_batch;
+        config.max_runs_per_batch = args.max_runs_per_batch;
         config.max_histogram_entries_per_batch = args.max_histogram_entries_per_batch;
         config.updated_at_slot = Clock::get()?.slot;
         Ok(())
@@ -71,6 +80,9 @@ pub mod runana_program {
         zone_registry.version = ACCOUNT_VERSION_V1;
         zone_registry.bump = ctx.bumps.zone_registry;
         zone_registry.zone_id = args.zone_id;
+        zone_registry.topology_version = args.topology_version;
+        zone_registry.total_subnode_count = args.total_subnode_count;
+        zone_registry.topology_hash = args.topology_hash;
         zone_registry.exp_multiplier_num = args.exp_multiplier_num;
         zone_registry.exp_multiplier_den = args.exp_multiplier_den;
         Ok(())
@@ -80,13 +92,14 @@ pub mod runana_program {
         ctx: Context<InitializeZoneEnemySet>,
         args: InitializeZoneEnemySetArgs,
     ) -> Result<()> {
-        verify_zone_enemy_set_members(&args.allowed_enemy_archetype_ids)?;
+        verify_zone_enemy_rule_entries(&args.enemy_rules)?;
 
         let zone_enemy_set = &mut ctx.accounts.zone_enemy_set;
         zone_enemy_set.version = ACCOUNT_VERSION_V1;
         zone_enemy_set.bump = ctx.bumps.zone_enemy_set;
         zone_enemy_set.zone_id = args.zone_id;
-        zone_enemy_set.allowed_enemy_archetype_ids = args.allowed_enemy_archetype_ids;
+        zone_enemy_set.topology_version = args.topology_version;
+        zone_enemy_set.enemy_rules = args.enemy_rules;
         Ok(())
     }
 
@@ -94,14 +107,40 @@ pub mod runana_program {
         ctx: Context<UpdateZoneEnemySet>,
         args: UpdateZoneEnemySetArgs,
     ) -> Result<()> {
-        verify_zone_enemy_set_members(&args.allowed_enemy_archetype_ids)?;
+        verify_zone_enemy_rule_entries(&args.enemy_rules)?;
 
         let zone_enemy_set = &mut ctx.accounts.zone_enemy_set;
         require!(
-            zone_enemy_set.zone_id == args.zone_id,
+            zone_enemy_set.zone_id == args.zone_id
+                && zone_enemy_set.topology_version == args.topology_version,
             SettlementError::ZoneEnemySetMismatch
         );
-        zone_enemy_set.allowed_enemy_archetype_ids = args.allowed_enemy_archetype_ids;
+        zone_enemy_set.enemy_rules = args.enemy_rules;
+        Ok(())
+    }
+
+    pub fn initialize_class_registry(
+        ctx: Context<InitializeClassRegistry>,
+        args: InitializeClassRegistryArgs,
+    ) -> Result<()> {
+        let class_registry = &mut ctx.accounts.class_registry;
+        class_registry.version = ACCOUNT_VERSION_V1;
+        class_registry.bump = ctx.bumps.class_registry;
+        class_registry.class_id = args.class_id;
+        class_registry.enabled = args.enabled;
+        Ok(())
+    }
+
+    pub fn update_class_registry(
+        ctx: Context<UpdateClassRegistry>,
+        args: UpdateClassRegistryArgs,
+    ) -> Result<()> {
+        let class_registry = &mut ctx.accounts.class_registry;
+        require!(
+            class_registry.class_id == args.class_id,
+            SettlementError::ClassRegistryMismatch
+        );
+        class_registry.enabled = args.enabled;
         Ok(())
     }
 
@@ -162,6 +201,14 @@ pub mod runana_program {
             ctx.accounts.character_zone_progress_page.page_index == initial_page_index,
             SettlementError::InvalidZoneProgressPage
         );
+        require!(
+            ctx.accounts.class_registry.class_id == args.class_id,
+            SettlementError::ClassRegistryMismatch
+        );
+        require!(
+            ctx.accounts.class_registry.enabled,
+            SettlementError::ClassDisabled
+        );
 
         let character_root_key = ctx.accounts.character_root.key();
         let genesis_state_hash = compute_genesis_state_hash(character_root_key, args.character_id);
@@ -172,6 +219,8 @@ pub mod runana_program {
         character_root.authority = ctx.accounts.authority.key();
         character_root.character_id = args.character_id;
         character_root.character_creation_ts = creation_metadata_ts;
+        character_root.class_id = args.class_id;
+        character_root.name = encode_fixed_ascii_name(&args.name)?;
 
         let character_stats = &mut ctx.accounts.character_stats;
         character_stats.version = ACCOUNT_VERSION_V1;
@@ -243,8 +292,8 @@ pub mod runana_program {
         )?;
         verify_program_controls(&ctx.accounts.program_config)?;
         verify_batch_policy_limits(&ctx.accounts.program_config, &args.payload)?;
-        verify_nonce_range(&args.payload)?;
-        verify_histogram_integrity(&args.payload)?;
+        verify_run_sequence_range(&args.payload)?;
+        verify_run_summary_integrity(&args.payload)?;
         verify_batch_hash(&args.payload)?;
         verify_batch_continuity(
             &ctx.accounts.character_settlement_batch_cursor,
@@ -257,19 +306,11 @@ pub mod runana_program {
             &ctx.accounts.season_policy,
             &args.payload,
         )?;
-        verify_zone_progress_delta(
+        verify_run_native_legality(
             &args.payload,
             &ctx.accounts.character_world_progress,
             &ctx.accounts.character_zone_progress_page,
             &remaining_accounts.additional_zone_progress_pages,
-        )?;
-        verify_world_eligibility(
-            &args.payload,
-            &ctx.accounts.character_zone_progress_page,
-            &remaining_accounts.additional_zone_progress_pages,
-        )?;
-        verify_zone_enemy_legality(
-            &args.payload,
             &remaining_accounts.zone_registries,
             &remaining_accounts.zone_enemy_sets,
             &remaining_accounts.enemy_archetype_registries,
@@ -296,9 +337,10 @@ pub mod runana_program {
             .total_exp
             .checked_add(u64::from(exp_delta))
             .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+        character_stats.level = total_exp_to_level(character_stats.total_exp)?;
 
         let cursor = &mut ctx.accounts.character_settlement_batch_cursor;
-        cursor.last_committed_end_nonce = args.payload.end_nonce;
+        cursor.last_committed_end_nonce = args.payload.end_run_sequence;
         cursor.last_committed_state_hash = args.payload.end_state_hash;
         cursor.last_committed_batch_id = args.payload.batch_id;
         cursor.last_committed_battle_ts = args.payload.last_battle_ts;
@@ -306,8 +348,9 @@ pub mod runana_program {
         cursor.updated_at_slot = Clock::get()?.slot;
 
         msg!(
-            "settlement_applied batch_id={} battle_count={} exp_delta={}",
+            "settlement_applied batch_id={} run_count={} battle_count={} exp_delta={}",
             args.payload.batch_id,
+            args.payload.run_summaries.len(),
             args.payload.battle_count,
             exp_delta
         );
@@ -347,7 +390,11 @@ pub struct InitializeZoneRegistry<'info> {
     #[account(
         init,
         payer = payer,
-        seeds = [ZONE_REGISTRY_SEED, &args.zone_id.to_le_bytes()],
+        seeds = [
+            ZONE_REGISTRY_SEED,
+            &args.zone_id.to_le_bytes(),
+            &args.topology_version.to_le_bytes(),
+        ],
         bump,
         space = ZoneRegistryAccount::LEN,
     )]
@@ -370,7 +417,11 @@ pub struct InitializeZoneEnemySet<'info> {
     #[account(
         init,
         payer = payer,
-        seeds = [ZONE_ENEMY_SET_SEED, &args.zone_id.to_le_bytes()],
+        seeds = [
+            ZONE_ENEMY_SET_SEED,
+            &args.zone_id.to_le_bytes(),
+            &args.topology_version.to_le_bytes(),
+        ],
         bump,
         space = ZoneEnemySetAccount::LEN,
     )]
@@ -391,10 +442,56 @@ pub struct UpdateZoneEnemySet<'info> {
     pub program_config: Account<'info, ProgramConfigAccount>,
     #[account(
         mut,
-        seeds = [ZONE_ENEMY_SET_SEED, &args.zone_id.to_le_bytes()],
+        seeds = [
+            ZONE_ENEMY_SET_SEED,
+            &args.zone_id.to_le_bytes(),
+            &args.topology_version.to_le_bytes(),
+        ],
         bump = zone_enemy_set.bump,
     )]
     pub zone_enemy_set: Account<'info, ZoneEnemySetAccount>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: InitializeClassRegistryArgs)]
+pub struct InitializeClassRegistry<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub admin_authority: Signer<'info>,
+    #[account(
+        seeds = [PROGRAM_CONFIG_SEED],
+        bump = program_config.bump,
+        constraint = program_config.admin_authority == admin_authority.key() @ SettlementError::UnauthorizedAdmin,
+    )]
+    pub program_config: Account<'info, ProgramConfigAccount>,
+    #[account(
+        init,
+        payer = payer,
+        seeds = [CLASS_REGISTRY_SEED, &args.class_id.to_le_bytes()],
+        bump,
+        space = ClassRegistryAccount::LEN,
+    )]
+    pub class_registry: Account<'info, ClassRegistryAccount>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: UpdateClassRegistryArgs)]
+pub struct UpdateClassRegistry<'info> {
+    #[account(mut)]
+    pub admin_authority: Signer<'info>,
+    #[account(
+        seeds = [PROGRAM_CONFIG_SEED],
+        bump = program_config.bump,
+        constraint = program_config.admin_authority == admin_authority.key() @ SettlementError::UnauthorizedAdmin,
+    )]
+    pub program_config: Account<'info, ProgramConfigAccount>,
+    #[account(
+        mut,
+        seeds = [CLASS_REGISTRY_SEED, &args.class_id.to_le_bytes()],
+        bump = class_registry.bump,
+    )]
+    pub class_registry: Account<'info, ClassRegistryAccount>,
 }
 
 #[derive(Accounts)]
@@ -457,6 +554,11 @@ pub struct CreateCharacter<'info> {
         bump = season_policy.bump,
     )]
     pub season_policy: Account<'info, SeasonPolicyAccount>,
+    #[account(
+        seeds = [CLASS_REGISTRY_SEED, &args.class_id.to_le_bytes()],
+        bump = class_registry.bump,
+    )]
+    pub class_registry: Account<'info, ClassRegistryAccount>,
     #[account(
         init,
         payer = payer,
@@ -561,12 +663,13 @@ pub struct ProgramConfigAccount {
     pub trusted_server_signer: Pubkey,
     pub settlement_paused: bool,
     pub max_battles_per_batch: u16,
+    pub max_runs_per_batch: u16,
     pub max_histogram_entries_per_batch: u16,
     pub updated_at_slot: u64,
 }
 
 impl ProgramConfigAccount {
-    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 1 + 2 + 2 + 8;
+    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 1 + 2 + 2 + 2 + 8;
 }
 
 #[account]
@@ -576,10 +679,12 @@ pub struct CharacterRootAccount {
     pub authority: Pubkey,
     pub character_id: [u8; 16],
     pub character_creation_ts: u64,
+    pub class_id: u16,
+    pub name: [u8; MAX_CHARACTER_NAME_LEN],
 }
 
 impl CharacterRootAccount {
-    pub const LEN: usize = 8 + 1 + 1 + 32 + 16 + 8;
+    pub const LEN: usize = 8 + 1 + 1 + 32 + 16 + 8 + 2 + MAX_CHARACTER_NAME_LEN;
 }
 
 #[account]
@@ -626,12 +731,15 @@ pub struct ZoneRegistryAccount {
     pub version: u8,
     pub bump: u8,
     pub zone_id: u16,
+    pub topology_version: u16,
+    pub total_subnode_count: u16,
+    pub topology_hash: [u8; 32],
     pub exp_multiplier_num: u16,
     pub exp_multiplier_den: u16,
 }
 
 impl ZoneRegistryAccount {
-    pub const LEN: usize = 8 + 1 + 1 + 2 + 2 + 2;
+    pub const LEN: usize = 8 + 1 + 1 + 2 + 2 + 2 + 32 + 2 + 2;
 }
 
 #[account]
@@ -639,11 +747,24 @@ pub struct ZoneEnemySetAccount {
     pub version: u8,
     pub bump: u8,
     pub zone_id: u16,
-    pub allowed_enemy_archetype_ids: Vec<u16>,
+    pub topology_version: u16,
+    pub enemy_rules: Vec<ZoneEnemyRuleEntry>,
 }
 
 impl ZoneEnemySetAccount {
-    pub const LEN: usize = 8 + 1 + 1 + 2 + 4 + (MAX_ZONE_ENEMY_SET_MEMBERS * 2);
+    pub const LEN: usize = 8 + 1 + 1 + 2 + 2 + 4 + (MAX_ZONE_ENEMY_RULES * 4);
+}
+
+#[account]
+pub struct ClassRegistryAccount {
+    pub version: u8,
+    pub bump: u8,
+    pub class_id: u16,
+    pub enabled: bool,
+}
+
+impl ClassRegistryAccount {
+    pub const LEN: usize = 8 + 1 + 1 + 2 + 1;
 }
 
 #[account]
@@ -695,12 +816,16 @@ pub struct InitializeProgramConfigArgs {
     pub trusted_server_signer: Pubkey,
     pub settlement_paused: bool,
     pub max_battles_per_batch: u16,
+    pub max_runs_per_batch: u16,
     pub max_histogram_entries_per_batch: u16,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InitializeZoneRegistryArgs {
     pub zone_id: u16,
+    pub topology_version: u16,
+    pub total_subnode_count: u16,
+    pub topology_hash: [u8; 32],
     pub exp_multiplier_num: u16,
     pub exp_multiplier_den: u16,
 }
@@ -708,13 +833,27 @@ pub struct InitializeZoneRegistryArgs {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InitializeZoneEnemySetArgs {
     pub zone_id: u16,
-    pub allowed_enemy_archetype_ids: Vec<u16>,
+    pub topology_version: u16,
+    pub enemy_rules: Vec<ZoneEnemyRuleEntry>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UpdateZoneEnemySetArgs {
     pub zone_id: u16,
-    pub allowed_enemy_archetype_ids: Vec<u16>,
+    pub topology_version: u16,
+    pub enemy_rules: Vec<ZoneEnemyRuleEntry>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InitializeClassRegistryArgs {
+    pub class_id: u16,
+    pub enabled: bool,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateClassRegistryArgs {
+    pub class_id: u16,
+    pub enabled: bool,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -735,6 +874,8 @@ pub struct InitializeSeasonPolicyArgs {
 pub struct CreateCharacterArgs {
     pub character_id: [u8; 16],
     pub initial_unlocked_zone_id: u16,
+    pub class_id: u16,
+    pub name: String,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
@@ -751,13 +892,12 @@ pub struct ApplyBattleSettlementBatchV1Args {
 pub struct SettlementBatchPayloadV1 {
     pub character_id: [u8; 16],
     pub batch_id: u64,
-    pub start_nonce: u64,
-    pub end_nonce: u64,
+    pub start_run_sequence: u64,
+    pub end_run_sequence: u64,
     pub battle_count: u16,
     pub start_state_hash: [u8; 32],
     pub end_state_hash: [u8; 32],
-    pub zone_progress_delta: Vec<ZoneProgressDeltaEntry>,
-    pub encounter_histogram: Vec<EncounterCountEntry>,
+    pub run_summaries: Vec<SettlementRunSummary>,
     pub optional_loadout_revision: Option<u32>,
     pub batch_hash: [u8; 32],
     pub first_battle_ts: u64,
@@ -775,25 +915,50 @@ pub struct EncounterCountEntry {
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RunEncounterCountEntry {
+    pub enemy_archetype_id: u16,
+    pub count: u16,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ZoneProgressDeltaEntry {
     pub zone_id: u16,
     pub new_state: u8,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ZoneEnemyRuleEntry {
+    pub enemy_archetype_id: u16,
+    pub max_per_run: u16,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettlementRunSummary {
+    pub closed_run_sequence: u64,
+    pub zone_id: u16,
+    pub topology_version: u16,
+    pub topology_hash: [u8; 32],
+    pub terminal_status: u8,
+    pub rewarded_battle_count: u16,
+    pub first_rewarded_battle_ts: u64,
+    pub last_rewarded_battle_ts: u64,
+    pub rewarded_encounter_histogram: Vec<RunEncounterCountEntry>,
+    pub zone_progress_delta: Vec<ZoneProgressDeltaEntry>,
 }
 
 #[derive(AnchorSerialize)]
 struct SettlementBatchPayloadPreimageV1 {
     character_id: [u8; 16],
     batch_id: u64,
-    start_nonce: u64,
-    end_nonce: u64,
+    start_run_sequence: u64,
+    end_run_sequence: u64,
     battle_count: u16,
     first_battle_ts: u64,
     last_battle_ts: u64,
     season_id: u32,
     start_state_hash: [u8; 32],
     end_state_hash: [u8; 32],
-    zone_progress_delta: Vec<ZoneProgressDeltaEntry>,
-    encounter_histogram: Vec<EncounterCountEntry>,
+    run_summaries: Vec<SettlementRunSummary>,
     optional_loadout_revision: Option<u32>,
     schema_version: u16,
     signature_scheme: u8,
@@ -804,16 +969,15 @@ impl From<&SettlementBatchPayloadV1> for SettlementBatchPayloadPreimageV1 {
         Self {
             character_id: payload.character_id,
             batch_id: payload.batch_id,
-            start_nonce: payload.start_nonce,
-            end_nonce: payload.end_nonce,
+            start_run_sequence: payload.start_run_sequence,
+            end_run_sequence: payload.end_run_sequence,
             battle_count: payload.battle_count,
             first_battle_ts: payload.first_battle_ts,
             last_battle_ts: payload.last_battle_ts,
             season_id: payload.season_id,
             start_state_hash: payload.start_state_hash,
             end_state_hash: payload.end_state_hash,
-            zone_progress_delta: payload.zone_progress_delta.clone(),
-            encounter_histogram: payload.encounter_histogram.clone(),
+            run_summaries: payload.run_summaries.clone(),
             optional_loadout_revision: payload.optional_loadout_revision,
             schema_version: payload.schema_version,
             signature_scheme: payload.signature_scheme,
@@ -829,6 +993,21 @@ fn compute_genesis_state_hash(character_root_pubkey: Pubkey, character_id: [u8; 
         &0_u64.to_le_bytes(),
     ])
     .to_bytes()
+}
+
+fn encode_fixed_ascii_name(name: &str) -> Result<[u8; MAX_CHARACTER_NAME_LEN]> {
+    require!(
+        !name.is_empty() && name.len() <= MAX_CHARACTER_NAME_LEN,
+        SettlementError::InvalidCharacterName
+    );
+    require!(
+        name.as_bytes().iter().all(|byte| byte.is_ascii()),
+        SettlementError::InvalidCharacterName
+    );
+
+    let mut out = [0_u8; MAX_CHARACTER_NAME_LEN];
+    out[..name.len()].copy_from_slice(name.as_bytes());
+    Ok(out)
 }
 
 fn verify_canonical_account_addresses(ctx: &Context<ApplyBattleSettlementBatchV1>) -> Result<()> {
@@ -933,11 +1112,15 @@ fn verify_batch_policy_limits(
     payload: &SettlementBatchPayloadV1,
 ) -> Result<()> {
     require!(
-        payload.battle_count <= program_config.max_battles_per_batch,
-        SettlementError::BatchBattleCountLimitExceeded
+        payload.run_summaries.len() <= usize::from(program_config.max_runs_per_batch),
+        SettlementError::BatchRunCountLimitExceeded
     );
+    let total_histogram_rows = payload.run_summaries.iter().try_fold(0_usize, |acc, summary| {
+        acc.checked_add(summary.rewarded_encounter_histogram.len())
+            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
+    })?;
     require!(
-        payload.encounter_histogram.len()
+        total_histogram_rows
             <= usize::from(program_config.max_histogram_entries_per_batch),
         SettlementError::HistogramEntryLimitExceeded
     );
@@ -1000,12 +1183,18 @@ struct LoadedSettlementRemainingAccounts<'info> {
     enemy_archetype_registries: Vec<EnemyArchetypeRegistryAccount>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ZoneVersionPair {
+    zone_id: u16,
+    topology_version: u16,
+}
+
 fn load_settlement_remaining_accounts<'info>(
     ctx: &Context<'_, '_, 'info, 'info, ApplyBattleSettlementBatchV1<'info>>,
     payload: &SettlementBatchPayloadV1,
 ) -> Result<LoadedSettlementRemainingAccounts<'info>> {
     let referenced_page_indices = referenced_zone_page_indices(payload);
-    let referenced_zone_ids = referenced_zone_ids(payload);
+    let referenced_zone_version_pairs = referenced_zone_version_pairs(payload);
     let referenced_enemy_ids = referenced_enemy_archetype_ids(payload);
     let mut cursor = 0usize;
 
@@ -1014,8 +1203,10 @@ fn load_settlement_remaining_accounts<'info>(
         referenced_page_indices.get(1..).unwrap_or(&[]),
         &mut cursor,
     )?;
-    let zone_registries = load_zone_registry_accounts(ctx, &referenced_zone_ids, &mut cursor)?;
-    let zone_enemy_sets = load_zone_enemy_set_accounts(ctx, &referenced_zone_ids, &mut cursor)?;
+    let zone_registries =
+        load_zone_registry_accounts(ctx, &referenced_zone_version_pairs, &mut cursor)?;
+    let zone_enemy_sets =
+        load_zone_enemy_set_accounts(ctx, &referenced_zone_version_pairs, &mut cursor)?;
     let enemy_archetype_registries =
         load_enemy_archetype_registry_accounts(ctx, &referenced_enemy_ids, &mut cursor)?;
 
@@ -1068,17 +1259,18 @@ fn load_additional_zone_progress_pages<'info>(
 
 fn load_zone_registry_accounts<'info>(
     ctx: &Context<'_, '_, 'info, 'info, ApplyBattleSettlementBatchV1<'info>>,
-    expected_zone_ids: &[u16],
+    expected_zone_version_pairs: &[ZoneVersionPair],
     cursor: &mut usize,
 ) -> Result<Vec<ZoneRegistryAccount>> {
-    let mut zone_registries = Vec::with_capacity(expected_zone_ids.len());
+    let mut zone_registries = Vec::with_capacity(expected_zone_version_pairs.len());
 
-    for zone_id in expected_zone_ids {
+    for pair in expected_zone_version_pairs {
         let account_info = ctx
             .remaining_accounts
             .get(*cursor)
             .ok_or_else(|| error!(SettlementError::MissingZoneRegistryAccount))?;
-        let expected_zone_registry = zone_registry_pda(ctx.program_id, *zone_id);
+        let expected_zone_registry =
+            zone_registry_pda(ctx.program_id, pair.zone_id, pair.topology_version);
         if account_info.key() != expected_zone_registry {
             let expected_present_later = ctx.remaining_accounts[*cursor + 1..]
                 .iter()
@@ -1091,7 +1283,7 @@ fn load_zone_registry_accounts<'info>(
 
         let account = Account::<ZoneRegistryAccount>::try_from(account_info)?;
         require!(
-            account.zone_id == *zone_id,
+            account.zone_id == pair.zone_id && account.topology_version == pair.topology_version,
             SettlementError::InvalidZoneRegistryPda
         );
         zone_registries.push(account.into_inner());
@@ -1103,17 +1295,18 @@ fn load_zone_registry_accounts<'info>(
 
 fn load_zone_enemy_set_accounts<'info>(
     ctx: &Context<'_, '_, 'info, 'info, ApplyBattleSettlementBatchV1<'info>>,
-    expected_zone_ids: &[u16],
+    expected_zone_version_pairs: &[ZoneVersionPair],
     cursor: &mut usize,
 ) -> Result<Vec<ZoneEnemySetAccount>> {
-    let mut zone_enemy_sets = Vec::with_capacity(expected_zone_ids.len());
+    let mut zone_enemy_sets = Vec::with_capacity(expected_zone_version_pairs.len());
 
-    for zone_id in expected_zone_ids {
+    for pair in expected_zone_version_pairs {
         let account_info = ctx
             .remaining_accounts
             .get(*cursor)
             .ok_or_else(|| error!(SettlementError::MissingZoneEnemySetAccount))?;
-        let expected_zone_enemy_set = zone_enemy_set_pda(ctx.program_id, *zone_id);
+        let expected_zone_enemy_set =
+            zone_enemy_set_pda(ctx.program_id, pair.zone_id, pair.topology_version);
         if account_info.key() != expected_zone_enemy_set {
             let expected_present_later = ctx.remaining_accounts[*cursor + 1..]
                 .iter()
@@ -1126,10 +1319,10 @@ fn load_zone_enemy_set_accounts<'info>(
 
         let account = Account::<ZoneEnemySetAccount>::try_from(account_info)?;
         require!(
-            account.zone_id == *zone_id,
+            account.zone_id == pair.zone_id && account.topology_version == pair.topology_version,
             SettlementError::InvalidZoneEnemySetPda
         );
-        verify_zone_enemy_set_members(&account.allowed_enemy_archetype_ids)?;
+        verify_zone_enemy_rule_entries(&account.enemy_rules)?;
         zone_enemy_sets.push(account.into_inner());
         *cursor += 1;
     }
@@ -1258,33 +1451,39 @@ fn verify_zone_progress_page_account(
 fn referenced_zone_page_indices(payload: &SettlementBatchPayloadV1) -> Vec<u16> {
     let mut page_indices = Vec::new();
 
-    for entry in &payload.encounter_histogram {
-        push_unique_page_index(&mut page_indices, entry.zone_id / ZONE_PAGE_WIDTH);
-    }
-    for entry in &payload.zone_progress_delta {
-        push_unique_page_index(&mut page_indices, entry.zone_id / ZONE_PAGE_WIDTH);
+    for summary in &payload.run_summaries {
+        push_unique_page_index(&mut page_indices, summary.zone_id / ZONE_PAGE_WIDTH);
+        for entry in &summary.zone_progress_delta {
+            push_unique_page_index(&mut page_indices, entry.zone_id / ZONE_PAGE_WIDTH);
+        }
     }
 
     page_indices.sort_unstable();
     page_indices
 }
 
-fn referenced_zone_ids(payload: &SettlementBatchPayloadV1) -> Vec<u16> {
-    let mut zone_ids = Vec::new();
-    for entry in &payload.encounter_histogram {
-        if !zone_ids.contains(&entry.zone_id) {
-            zone_ids.push(entry.zone_id);
+fn referenced_zone_version_pairs(payload: &SettlementBatchPayloadV1) -> Vec<ZoneVersionPair> {
+    let mut pairs = Vec::new();
+    for summary in &payload.run_summaries {
+        let pair = ZoneVersionPair {
+            zone_id: summary.zone_id,
+            topology_version: summary.topology_version,
+        };
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
         }
     }
-    zone_ids.sort_unstable();
-    zone_ids
+    pairs.sort_by_key(|pair| (pair.zone_id, pair.topology_version));
+    pairs
 }
 
 fn referenced_enemy_archetype_ids(payload: &SettlementBatchPayloadV1) -> Vec<u16> {
     let mut enemy_ids = Vec::new();
-    for entry in &payload.encounter_histogram {
-        if !enemy_ids.contains(&entry.enemy_archetype_id) {
-            enemy_ids.push(entry.enemy_archetype_id);
+    for summary in &payload.run_summaries {
+        for entry in &summary.rewarded_encounter_histogram {
+            if !enemy_ids.contains(&entry.enemy_archetype_id) {
+                enemy_ids.push(entry.enemy_archetype_id);
+            }
         }
     }
     enemy_ids.sort_unstable();
@@ -1297,12 +1496,28 @@ fn push_unique_page_index(page_indices: &mut Vec<u16>, page_index: u16) {
     }
 }
 
-fn zone_registry_pda(program_id: &Pubkey, zone_id: u16) -> Pubkey {
-    Pubkey::find_program_address(&[ZONE_REGISTRY_SEED, &zone_id.to_le_bytes()], program_id).0
+fn zone_registry_pda(program_id: &Pubkey, zone_id: u16, topology_version: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            ZONE_REGISTRY_SEED,
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        program_id,
+    )
+    .0
 }
 
-fn zone_enemy_set_pda(program_id: &Pubkey, zone_id: u16) -> Pubkey {
-    Pubkey::find_program_address(&[ZONE_ENEMY_SET_SEED, &zone_id.to_le_bytes()], program_id).0
+fn zone_enemy_set_pda(program_id: &Pubkey, zone_id: u16, topology_version: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            ZONE_ENEMY_SET_SEED,
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        program_id,
+    )
+    .0
 }
 
 fn enemy_archetype_registry_pda(program_id: &Pubkey, enemy_archetype_id: u16) -> Pubkey {
@@ -1325,14 +1540,21 @@ fn zone_progress_page_pda(program_id: &Pubkey, character_root: &Pubkey, page_ind
     .0
 }
 
-fn verify_zone_enemy_set_members(enemy_ids: &[u16]) -> Result<()> {
+fn verify_zone_enemy_rule_entries(enemy_rules: &[ZoneEnemyRuleEntry]) -> Result<()> {
     require!(
-        enemy_ids.len() <= MAX_ZONE_ENEMY_SET_MEMBERS,
+        enemy_rules.len() <= MAX_ZONE_ENEMY_RULES,
         SettlementError::InvalidZoneEnemySet
     );
 
-    for pair in enemy_ids.windows(2) {
-        require!(pair[0] < pair[1], SettlementError::InvalidZoneEnemySet);
+    for rule in enemy_rules {
+        require!(rule.max_per_run > 0, SettlementError::InvalidZoneEnemySet);
+    }
+
+    for pair in enemy_rules.windows(2) {
+        require!(
+            pair[0].enemy_archetype_id < pair[1].enemy_archetype_id,
+            SettlementError::InvalidZoneEnemySet
+        );
     }
 
     Ok(())
@@ -1416,15 +1638,6 @@ fn verify_server_attestation_preinstruction(
         SettlementError::MissingEd25519Preinstructions
     );
 
-    let server_ix = load_instruction_at_checked(current_index - 1, &instructions_sysvar)
-        .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
-
-    require_keys_eq!(
-        server_ix.program_id,
-        ed25519_program::ID,
-        SettlementError::InvalidEd25519InstructionOrder
-    );
-
     let expected_server_message = canonical_server_attestation_message(
         ctx.program_id,
         CLUSTER_ID_LOCALNET,
@@ -1432,17 +1645,24 @@ fn verify_server_attestation_preinstruction(
         payload,
     );
 
-    let server_ix_payload = parse_ed25519_instruction_payload(&server_ix.data)?;
     let expected_server_signer = ctx.accounts.program_config.trusted_server_signer;
 
-    let server_signer_matches = server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
+    for index in (0..current_index).rev() {
+        let instruction = load_instruction_at_checked(index, &instructions_sysvar)
+            .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
+        if instruction.program_id != ed25519_program::ID {
+            continue;
+        }
 
-    require!(
-        server_signer_matches && server_ix_payload.message == expected_server_message.as_slice(),
-        SettlementError::ServerAttestationMismatch
-    );
+        let server_ix_payload = parse_ed25519_instruction_payload(&instruction.data)?;
+        let server_signer_matches =
+            server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
+        if server_signer_matches && server_ix_payload.message == expected_server_message.as_slice() {
+            return Ok(());
+        }
+    }
 
-    Ok(())
+    err!(SettlementError::ServerAttestationMismatch)
 }
 
 struct ParsedEd25519InstructionPayload<'a> {
@@ -1528,44 +1748,48 @@ fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes))
 }
 
-fn verify_nonce_range(payload: &SettlementBatchPayloadV1) -> Result<()> {
-    let expected_battle_count = payload
-        .end_nonce
-        .checked_sub(payload.start_nonce)
+fn verify_run_sequence_range(payload: &SettlementBatchPayloadV1) -> Result<()> {
+    let expected_run_count = payload
+        .end_run_sequence
+        .checked_sub(payload.start_run_sequence)
         .and_then(|delta| delta.checked_add(1))
-        .ok_or_else(|| error!(SettlementError::InvalidNonceRange))?;
+        .ok_or_else(|| error!(SettlementError::InvalidRunSequenceRange))?;
 
     require!(
-        expected_battle_count == u64::from(payload.battle_count),
-        SettlementError::InvalidNonceRange
+        expected_run_count == payload.run_summaries.len() as u64,
+        SettlementError::InvalidRunSequenceRange
     );
 
     Ok(())
 }
 
-fn verify_histogram_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> {
-    for (index, entry) in payload.encounter_histogram.iter().enumerate() {
-        require!(
-            entry.count > 0,
-            SettlementError::ZeroEncounterHistogramEntry
-        );
+fn verify_run_summary_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> {
+    let histogram_total = payload.run_summaries.iter().try_fold(0_u64, |acc, summary| {
+        let summary_total =
+            summary
+                .rewarded_encounter_histogram
+                .iter()
+                .try_fold(0_u64, |summary_acc, entry| {
+                    require!(
+                        entry.count > 0,
+                        SettlementError::ZeroEncounterHistogramEntry
+                    );
+                    summary_acc
+                        .checked_add(u64::from(entry.count))
+                        .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
+                })?;
 
-        let is_duplicate = payload.encounter_histogram[..index].iter().any(|prior| {
-            prior.zone_id == entry.zone_id && prior.enemy_archetype_id == entry.enemy_archetype_id
-        });
         require!(
-            !is_duplicate,
-            SettlementError::DuplicateEncounterHistogramEntry
+            summary_total == u64::from(summary.rewarded_battle_count),
+            SettlementError::RunRewardedBattleCountMismatch
         );
-    }
-
-    let histogram_total = payload
-        .encounter_histogram
-        .iter()
-        .try_fold(0_u64, |acc, entry| {
-            acc.checked_add(u64::from(entry.count))
-                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
-        })?;
+        require!(
+            is_terminal_status_supported(summary.terminal_status),
+            SettlementError::InvalidTerminalStatus
+        );
+        acc.checked_add(summary_total)
+            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
+    })?;
 
     require!(
         histogram_total == u64::from(payload.battle_count),
@@ -1575,15 +1799,53 @@ fn verify_histogram_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> 
     Ok(())
 }
 
-fn verify_world_eligibility(
+fn verify_run_native_legality(
     payload: &SettlementBatchPayloadV1,
+    character_world_progress: &CharacterWorldProgressAccount,
     primary_zone_progress_page: &CharacterZoneProgressPageAccount,
     additional_zone_progress_pages: &[LoadedZoneProgressPage],
+    zone_registries: &[ZoneRegistryAccount],
+    zone_enemy_sets: &[ZoneEnemySetAccount],
+    enemy_archetype_registries: &[EnemyArchetypeRegistryAccount],
 ) -> Result<()> {
-    for entry in &payload.encounter_histogram {
-        let effective_zone_state = effective_zone_state_after_batch(
-            entry.zone_id,
-            payload,
+    verify_world_progress_summary_consistency(
+        character_world_progress,
+        primary_zone_progress_page,
+        additional_zone_progress_pages,
+    )?;
+
+    let mut next_zone_states: Vec<(u16, u8)> = Vec::new();
+
+    for (index, summary) in payload.run_summaries.iter().enumerate() {
+        require!(
+            summary.closed_run_sequence
+                == payload
+                    .start_run_sequence
+                    .checked_add(index as u64)
+                    .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?,
+            SettlementError::InvalidRunSequenceGap
+        );
+        require!(
+            summary.first_rewarded_battle_ts >= payload.first_battle_ts
+                && summary.last_rewarded_battle_ts <= payload.last_battle_ts
+                && summary.last_rewarded_battle_ts >= summary.first_rewarded_battle_ts,
+            SettlementError::BattleTimestampRegression
+        );
+
+        let zone_registry =
+            zone_registry_for_summary(zone_registries, summary.zone_id, summary.topology_version)?;
+        require!(
+            zone_registry.topology_hash == summary.topology_hash,
+            SettlementError::TopologyHashMismatch
+        );
+        require!(
+            summary.rewarded_battle_count <= zone_registry.total_subnode_count,
+            SettlementError::RunRewardedBattleCountExceedsTopology
+        );
+
+        let effective_zone_state = effective_zone_state(
+            summary.zone_id,
+            &next_zone_states,
             primary_zone_progress_page,
             additional_zone_progress_pages,
         )?;
@@ -1591,81 +1853,56 @@ fn verify_world_eligibility(
             effective_zone_state >= ZONE_STATE_UNLOCKED,
             SettlementError::IllegalLockedZoneReference
         );
-    }
 
-    Ok(())
-}
+        let zone_enemy_set =
+            zone_enemy_set_for_summary(zone_enemy_sets, summary.zone_id, summary.topology_version)?;
 
-fn effective_zone_state_after_batch(
-    zone_id: u16,
-    payload: &SettlementBatchPayloadV1,
-    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
-    additional_zone_progress_pages: &[LoadedZoneProgressPage],
-) -> Result<u8> {
-    let mut effective_state = zone_state(
-        zone_id,
-        primary_zone_progress_page,
-        additional_zone_progress_pages,
-    )?;
+        let mut seen_archetype_ids = Vec::new();
+        let mut rewarded_histogram_total = 0_u64;
+        for row in &summary.rewarded_encounter_histogram {
+            require!(
+                !seen_archetype_ids.contains(&row.enemy_archetype_id),
+                SettlementError::DuplicateEncounterHistogramEntry
+            );
+            seen_archetype_ids.push(row.enemy_archetype_id);
 
-    for delta in &payload.zone_progress_delta {
-        if delta.zone_id == zone_id && delta.new_state > effective_state {
-            effective_state = delta.new_state;
+            let rule = zone_enemy_set
+                .enemy_rules
+                .iter()
+                .find(|rule| rule.enemy_archetype_id == row.enemy_archetype_id)
+                .ok_or_else(|| error!(SettlementError::IllegalZoneEnemyPair))?;
+            require!(
+                row.count <= rule.max_per_run,
+                SettlementError::EnemyArchetypeMaxPerRunExceeded
+            );
+            let _enemy_archetype = enemy_archetype_registry_for_entry(
+                enemy_archetype_registries,
+                row.enemy_archetype_id,
+            )?;
+            rewarded_histogram_total = rewarded_histogram_total
+                .checked_add(u64::from(row.count))
+                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
         }
-    }
-
-    Ok(effective_state)
-}
-
-fn verify_zone_progress_delta(
-    payload: &SettlementBatchPayloadV1,
-    character_world_progress: &CharacterWorldProgressAccount,
-    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
-    additional_zone_progress_pages: &[LoadedZoneProgressPage],
-) -> Result<()> {
-    let mut seen_zone_ids = Vec::new();
-
-    for entry in &payload.zone_progress_delta {
-        require!(
-            !seen_zone_ids.contains(&entry.zone_id),
-            SettlementError::DuplicateZoneProgressDelta
-        );
-        seen_zone_ids.push(entry.zone_id);
 
         require!(
-            entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED,
-            SettlementError::InvalidZoneProgressDelta
+            rewarded_histogram_total == u64::from(summary.rewarded_battle_count),
+            SettlementError::RunRewardedBattleCountMismatch
         );
 
-        let prior_state = zone_state(
-            entry.zone_id,
+        if summary.terminal_status != TERMINAL_STATUS_COMPLETED {
+            require!(
+                summary.zone_progress_delta.is_empty(),
+                SettlementError::InvalidZoneProgressDelta
+            );
+        }
+
+        verify_and_apply_zone_progress_deltas(
+            &summary.zone_progress_delta,
+            &mut next_zone_states,
             primary_zone_progress_page,
             additional_zone_progress_pages,
         )?;
-        require!(
-            entry.new_state >= prior_state,
-            SettlementError::InvalidZoneProgressDelta
-        );
-
-        let is_allowed_transition = match prior_state {
-            0 => entry.new_state == ZONE_STATE_UNLOCKED,
-            ZONE_STATE_UNLOCKED => {
-                entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED
-            }
-            ZONE_STATE_CLEARED => entry.new_state == ZONE_STATE_CLEARED,
-            _ => false,
-        };
-        require!(
-            is_allowed_transition,
-            SettlementError::InvalidZoneProgressDelta
-        );
     }
-
-    verify_world_progress_summary_consistency(
-        character_world_progress,
-        primary_zone_progress_page,
-        additional_zone_progress_pages,
-    )?;
 
     Ok(())
 }
@@ -1689,49 +1926,97 @@ fn zone_state(
     Ok(page.data.zone_states[(zone_id % ZONE_PAGE_WIDTH) as usize])
 }
 
-fn verify_zone_enemy_legality(
-    payload: &SettlementBatchPayloadV1,
-    zone_registries: &[ZoneRegistryAccount],
-    zone_enemy_sets: &[ZoneEnemySetAccount],
-    enemy_archetype_registries: &[EnemyArchetypeRegistryAccount],
-) -> Result<()> {
-    for entry in &payload.encounter_histogram {
-        let _zone_registry = zone_registry_for_entry(zone_registries, entry.zone_id)?;
-        let zone_enemy_set = zone_enemy_set_for_entry(zone_enemy_sets, entry.zone_id)?;
-        let _enemy_archetype = enemy_archetype_registry_for_entry(
-            enemy_archetype_registries,
-            entry.enemy_archetype_id,
-        )?;
+fn effective_zone_state(
+    zone_id: u16,
+    next_zone_states: &[(u16, u8)],
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<u8> {
+    if let Some((_, state)) = next_zone_states.iter().find(|(candidate, _)| *candidate == zone_id) {
+        return Ok(*state);
+    }
+    zone_state(zone_id, primary_zone_progress_page, additional_zone_progress_pages)
+}
 
+fn verify_and_apply_zone_progress_deltas(
+    deltas: &[ZoneProgressDeltaEntry],
+    next_zone_states: &mut Vec<(u16, u8)>,
+    primary_zone_progress_page: &CharacterZoneProgressPageAccount,
+    additional_zone_progress_pages: &[LoadedZoneProgressPage],
+) -> Result<()> {
+    let mut seen_zone_ids = Vec::new();
+
+    for entry in deltas {
         require!(
-            zone_enemy_set
-                .allowed_enemy_archetype_ids
-                .binary_search(&entry.enemy_archetype_id)
-                .is_ok(),
-            SettlementError::IllegalZoneEnemyPair
+            !seen_zone_ids.contains(&entry.zone_id),
+            SettlementError::DuplicateZoneProgressDelta
         );
+        seen_zone_ids.push(entry.zone_id);
+        require!(
+            entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED,
+            SettlementError::InvalidZoneProgressDelta
+        );
+
+        let prior_state = effective_zone_state(
+            entry.zone_id,
+            next_zone_states,
+            primary_zone_progress_page,
+            additional_zone_progress_pages,
+        )?;
+        require!(
+            entry.new_state >= prior_state,
+            SettlementError::InvalidZoneProgressDelta
+        );
+        let is_allowed_transition = match prior_state {
+            0 => entry.new_state == ZONE_STATE_UNLOCKED,
+            ZONE_STATE_UNLOCKED => {
+                entry.new_state == ZONE_STATE_UNLOCKED || entry.new_state == ZONE_STATE_CLEARED
+            }
+            ZONE_STATE_CLEARED => entry.new_state == ZONE_STATE_CLEARED,
+            _ => false,
+        };
+        require!(
+            is_allowed_transition,
+            SettlementError::InvalidZoneProgressDelta
+        );
+
+        if let Some(existing) = next_zone_states
+            .iter_mut()
+            .find(|(zone_id, _)| *zone_id == entry.zone_id)
+        {
+            existing.1 = existing.1.max(entry.new_state);
+        } else {
+            next_zone_states.push((entry.zone_id, entry.new_state));
+        }
     }
 
     Ok(())
 }
 
-fn zone_registry_for_entry(
+fn zone_registry_for_summary(
     zone_registries: &[ZoneRegistryAccount],
     zone_id: u16,
+    topology_version: u16,
 ) -> Result<&ZoneRegistryAccount> {
     zone_registries
         .iter()
-        .find(|zone_registry| zone_registry.zone_id == zone_id)
+        .find(|zone_registry| {
+            zone_registry.zone_id == zone_id && zone_registry.topology_version == topology_version
+        })
         .ok_or_else(|| error!(SettlementError::MissingZoneRegistryAccount))
 }
 
-fn zone_enemy_set_for_entry(
+fn zone_enemy_set_for_summary(
     zone_enemy_sets: &[ZoneEnemySetAccount],
     zone_id: u16,
+    topology_version: u16,
 ) -> Result<&ZoneEnemySetAccount> {
     zone_enemy_sets
         .iter()
-        .find(|zone_enemy_set| zone_enemy_set.zone_id == zone_id)
+        .find(|zone_enemy_set| {
+            zone_enemy_set.zone_id == zone_id
+                && zone_enemy_set.topology_version == topology_version
+        })
         .ok_or_else(|| error!(SettlementError::MissingZoneEnemySetAccount))
 }
 
@@ -1764,7 +2049,7 @@ fn verify_batch_continuity(
     cursor: &CharacterSettlementBatchCursorAccount,
     payload: &SettlementBatchPayloadV1,
 ) -> Result<()> {
-    let expected_start_nonce = cursor
+    let expected_start_run_sequence = cursor
         .last_committed_end_nonce
         .checked_add(1)
         .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
@@ -1774,8 +2059,8 @@ fn verify_batch_continuity(
         .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
 
     require!(
-        payload.start_nonce == expected_start_nonce,
-        SettlementError::InvalidStartNonce
+        payload.start_run_sequence == expected_start_run_sequence,
+        SettlementError::InvalidStartRunSequence
     );
     require!(
         payload.batch_id == expected_batch_id,
@@ -1858,26 +2143,30 @@ fn derive_exp_delta(
     enemy_archetype_registries: &[EnemyArchetypeRegistryAccount],
 ) -> Result<u32> {
     let mut total_exp = 0_u128;
-    for entry in &payload.encounter_histogram {
-        let zone_registry = zone_registry_for_entry(zone_registries, entry.zone_id)?;
-        let enemy_archetype_registry = enemy_archetype_registry_for_entry(
-            enemy_archetype_registries,
-            entry.enemy_archetype_id,
-        )?;
+    for summary in &payload.run_summaries {
+        let zone_registry =
+            zone_registry_for_summary(zone_registries, summary.zone_id, summary.topology_version)?;
         require!(
             zone_registry.exp_multiplier_den > 0,
             SettlementError::InvalidZoneConfig
         );
 
-        let weighted_exp = u128::from(entry.count)
-            .checked_mul(u128::from(enemy_archetype_registry.exp_reward_base))
-            .and_then(|value| value.checked_mul(u128::from(zone_registry.exp_multiplier_num)))
-            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?
-            / u128::from(zone_registry.exp_multiplier_den);
+        for entry in &summary.rewarded_encounter_histogram {
+            let enemy_archetype_registry = enemy_archetype_registry_for_entry(
+                enemy_archetype_registries,
+                entry.enemy_archetype_id,
+            )?;
 
-        total_exp = total_exp
-            .checked_add(weighted_exp)
-            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+            let weighted_exp = u128::from(entry.count)
+                .checked_mul(u128::from(enemy_archetype_registry.exp_reward_base))
+                .and_then(|value| value.checked_mul(u128::from(zone_registry.exp_multiplier_num)))
+                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?
+                / u128::from(zone_registry.exp_multiplier_den);
+
+            total_exp = total_exp
+                .checked_add(weighted_exp)
+                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+        }
     }
 
     u32::try_from(total_exp).map_err(|_| error!(SettlementError::ArithmeticOverflow))
@@ -1889,34 +2178,36 @@ fn apply_zone_progress_delta(
     additional_zone_progress_pages: &mut [LoadedZoneProgressPage],
     character_world_progress: &mut CharacterWorldProgressAccount,
 ) -> Result<()> {
-    for entry in &payload.zone_progress_delta {
-        let zone_offset = (entry.zone_id % ZONE_PAGE_WIDTH) as usize;
-        let page_index = entry.zone_id / ZONE_PAGE_WIDTH;
-        if primary_zone_progress_page.page_index == page_index {
-            let prior_state = primary_zone_progress_page.zone_states[zone_offset];
-            if entry.new_state > prior_state {
-                primary_zone_progress_page.zone_states[zone_offset] = entry.new_state;
+    for summary in &payload.run_summaries {
+        for entry in &summary.zone_progress_delta {
+            let zone_offset = (entry.zone_id % ZONE_PAGE_WIDTH) as usize;
+            let page_index = entry.zone_id / ZONE_PAGE_WIDTH;
+            if primary_zone_progress_page.page_index == page_index {
+                let prior_state = primary_zone_progress_page.zone_states[zone_offset];
+                if entry.new_state > prior_state {
+                    primary_zone_progress_page.zone_states[zone_offset] = entry.new_state;
+                }
+            } else {
+                let zone_page = additional_zone_progress_pages
+                    .iter_mut()
+                    .find(|page| page.data.page_index == page_index)
+                    .ok_or_else(|| error!(SettlementError::MissingZoneProgressPageAccount))?;
+                let prior_state = zone_page.data.zone_states[zone_offset];
+                if entry.new_state > prior_state {
+                    zone_page.data.zone_states[zone_offset] = entry.new_state;
+                }
             }
-        } else {
-            let zone_page = additional_zone_progress_pages
-                .iter_mut()
-                .find(|page| page.data.page_index == page_index)
-                .ok_or_else(|| error!(SettlementError::MissingZoneProgressPageAccount))?;
-            let prior_state = zone_page.data.zone_states[zone_offset];
-            if entry.new_state > prior_state {
-                zone_page.data.zone_states[zone_offset] = entry.new_state;
-            }
-        }
 
-        if entry.new_state >= ZONE_STATE_UNLOCKED {
-            character_world_progress.highest_unlocked_zone_id = character_world_progress
-                .highest_unlocked_zone_id
-                .max(entry.zone_id);
-        }
-        if entry.new_state >= ZONE_STATE_CLEARED {
-            character_world_progress.highest_cleared_zone_id = character_world_progress
-                .highest_cleared_zone_id
-                .max(entry.zone_id);
+            if entry.new_state >= ZONE_STATE_UNLOCKED {
+                character_world_progress.highest_unlocked_zone_id = character_world_progress
+                    .highest_unlocked_zone_id
+                    .max(entry.zone_id);
+            }
+            if entry.new_state >= ZONE_STATE_CLEARED {
+                character_world_progress.highest_cleared_zone_id = character_world_progress
+                    .highest_cleared_zone_id
+                    .max(entry.zone_id);
+            }
         }
     }
 
@@ -1951,16 +2242,15 @@ fn canonical_server_attestation_message(
     out.extend_from_slice(character_root_pubkey.as_ref());
     out.extend_from_slice(&payload.character_id);
     out.extend_from_slice(&payload.batch_id.to_le_bytes());
-    out.extend_from_slice(&payload.start_nonce.to_le_bytes());
-    out.extend_from_slice(&payload.end_nonce.to_le_bytes());
+    out.extend_from_slice(&payload.start_run_sequence.to_le_bytes());
+    out.extend_from_slice(&payload.end_run_sequence.to_le_bytes());
     out.extend_from_slice(&payload.battle_count.to_le_bytes());
     out.extend_from_slice(&payload.first_battle_ts.to_le_bytes());
     out.extend_from_slice(&payload.last_battle_ts.to_le_bytes());
     out.extend_from_slice(&payload.season_id.to_le_bytes());
     out.extend_from_slice(&payload.start_state_hash);
     out.extend_from_slice(&payload.end_state_hash);
-    put_zone_progress_delta_vec(&mut out, &payload.zone_progress_delta);
-    put_encounter_histogram_vec(&mut out, &payload.encounter_histogram);
+    put_run_summaries_vec(&mut out, &payload.run_summaries);
     put_option_u32(&mut out, payload.optional_loadout_revision);
     out.extend_from_slice(&payload.batch_hash);
     out.extend_from_slice(&payload.schema_version.to_le_bytes());
@@ -1975,6 +2265,25 @@ fn lower_hex(bytes: &[u8]) -> String {
         out.push(HEX_LOWER[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn is_terminal_status_supported(value: u8) -> bool {
+    matches!(
+        value,
+        TERMINAL_STATUS_COMPLETED
+            | TERMINAL_STATUS_FAILED
+            | TERMINAL_STATUS_ABANDONED
+            | TERMINAL_STATUS_EXPIRED
+            | TERMINAL_STATUS_SEASON_CUTOFF
+    )
+}
+
+fn total_exp_to_level(total_exp: u64) -> Result<u16> {
+    let derived = total_exp
+        .checked_div(EXP_PER_LEVEL)
+        .and_then(|level_floor| level_floor.checked_add(1))
+        .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+    u16::try_from(derived).map_err(|_| error!(SettlementError::ArithmeticOverflow))
 }
 
 fn base64url(bytes: &[u8]) -> String {
@@ -2075,12 +2384,27 @@ fn put_zone_progress_delta_vec(out: &mut Vec<u8>, entries: &[ZoneProgressDeltaEn
     }
 }
 
-fn put_encounter_histogram_vec(out: &mut Vec<u8>, entries: &[EncounterCountEntry]) {
+fn put_run_encounter_histogram_vec(out: &mut Vec<u8>, entries: &[RunEncounterCountEntry]) {
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for entry in entries {
-        out.extend_from_slice(&entry.zone_id.to_le_bytes());
         out.extend_from_slice(&entry.enemy_archetype_id.to_le_bytes());
         out.extend_from_slice(&entry.count.to_le_bytes());
+    }
+}
+
+fn put_run_summaries_vec(out: &mut Vec<u8>, entries: &[SettlementRunSummary]) {
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        out.extend_from_slice(&entry.closed_run_sequence.to_le_bytes());
+        out.extend_from_slice(&entry.zone_id.to_le_bytes());
+        out.extend_from_slice(&entry.topology_version.to_le_bytes());
+        out.extend_from_slice(&entry.topology_hash);
+        out.push(entry.terminal_status);
+        out.extend_from_slice(&entry.rewarded_battle_count.to_le_bytes());
+        out.extend_from_slice(&entry.first_rewarded_battle_ts.to_le_bytes());
+        out.extend_from_slice(&entry.last_rewarded_battle_ts.to_le_bytes());
+        put_run_encounter_histogram_vec(out, &entry.rewarded_encounter_histogram);
+        put_zone_progress_delta_vec(out, &entry.zone_progress_delta);
     }
 }
 
@@ -2114,12 +2438,12 @@ pub enum SettlementError {
     PlayerAuthorizationMismatch,
     #[msg("The settlement payload uses an unsupported signature scheme")]
     UnsupportedSignatureScheme,
-    #[msg("The settlement nonce range does not match battle_count")]
-    InvalidNonceRange,
+    #[msg("The settlement run-sequence range does not match the sealed run summaries")]
+    InvalidRunSequenceRange,
     #[msg("The encounter histogram total does not match battle_count")]
     HistogramCountMismatch,
-    #[msg("The settlement batch exceeds the configured max_battles_per_batch")]
-    BatchBattleCountLimitExceeded,
+    #[msg("The settlement batch exceeds the configured max_runs_per_batch")]
+    BatchRunCountLimitExceeded,
     #[msg("The settlement batch exceeds the configured max_histogram_entries_per_batch")]
     HistogramEntryLimitExceeded,
     #[msg("Duplicate encounter histogram zone/enemy pairs are forbidden")]
@@ -2136,12 +2460,14 @@ pub enum SettlementError {
     PlayerAuthorityMismatch,
     #[msg("A derived character-side account is not bound to the provided character root")]
     CharacterAccountBindingMismatch,
-    #[msg("The settlement start nonce must follow the cursor end nonce")]
-    InvalidStartNonce,
+    #[msg("The settlement start run sequence must follow the cursor end sequence")]
+    InvalidStartRunSequence,
     #[msg("The settlement batch id must be strictly sequential")]
     InvalidBatchSequence,
     #[msg("The payload start_state_hash does not match the cursor")]
     StartStateHashMismatch,
+    #[msg("The settlement run summaries must be strictly contiguous and ordered")]
+    InvalidRunSequenceGap,
     #[msg("Player-owned account creation must be funded by the player authority")]
     PlayerMustSelfFund,
     #[msg("The program config PDA does not match the canonical seed")]
@@ -2174,6 +2500,12 @@ pub enum SettlementError {
     ZoneProgressPageMustBeWritable,
     #[msg("Zone enemy sets must contain a sorted unique list of legal enemy ids within the configured cap")]
     InvalidZoneEnemySet,
+    #[msg("The selected class registry entry does not match the requested class id")]
+    ClassRegistryMismatch,
+    #[msg("The selected class is disabled")]
+    ClassDisabled,
+    #[msg("The provided character name is invalid")]
+    InvalidCharacterName,
     #[msg("Zone progress delta entries violate the canonical monotonic transition rules")]
     InvalidZoneProgressDelta,
     #[msg("Duplicate zone progress delta entries are forbidden")]
@@ -2190,6 +2522,8 @@ pub enum SettlementError {
     SeasonPolicyMismatch,
     #[msg("The provided zone enemy set is inconsistent with the zone or enemy registry")]
     ZoneEnemySetMismatch,
+    #[msg("The provided class registry is inconsistent with the requested class id")]
+    InvalidClassRegistryPda,
     #[msg("The settlement batch is missing a required zone registry account")]
     MissingZoneRegistryAccount,
     #[msg("The settlement batch is missing a required zone enemy set account")]
@@ -2206,6 +2540,16 @@ pub enum SettlementError {
     IllegalLockedZoneReference,
     #[msg("The settlement batch references an enemy that is not legal for the zone")]
     IllegalZoneEnemyPair,
+    #[msg("The settlement batch references a topology hash that does not match the zone metadata")]
+    TopologyHashMismatch,
+    #[msg("A run summary rewarded battle count exceeds the topology subnode count")]
+    RunRewardedBattleCountExceedsTopology,
+    #[msg("A run summary rewarded battle count does not match its histogram sum")]
+    RunRewardedBattleCountMismatch,
+    #[msg("A run summary terminal status is invalid")]
+    InvalidTerminalStatus,
+    #[msg("A run histogram row exceeded max_per_run for its archetype")]
+    EnemyArchetypeMaxPerRunExceeded,
     #[msg("The encounter histogram zone does not match the provided zone registry")]
     EncounterZoneMismatch,
     #[msg("The encounter histogram enemy does not match the provided enemy registry")]
