@@ -7,6 +7,7 @@ use crate::{
         canonical_player_authorization_message, canonical_server_attestation_message,
         canonical_server_signer_keypair, unique_integration_fixture_set, CanonicalBatchFixture,
         CanonicalBatchPayloadFixture, CanonicalFixtureSet,
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1,
     },
     integration_helpers::{
         build_dual_ed25519_verification_instructions, build_ed25519_verification_instruction,
@@ -208,7 +209,9 @@ fn test_apply_battle_settlement_batch_v1_rejects_wrong_character_owner() {
 
 #[test]
 fn test_apply_battle_settlement_batch_v1_rejects_server_signature_domain_mismatch() {
-    let fixtures = unique_integration_fixture_set();
+    let mut fixtures = unique_integration_fixture_set();
+    fixtures.program.settlement_authorization_mode =
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&fixtures)
@@ -294,6 +297,6 @@ fn test_apply_battle_settlement_batch_v1_rejects_reversed_ed25519_instruction_or
 
     assert_err_contains(
         err,
-        "The settlement instruction must be preceded by two ed25519 instructions in order",
+        "The settlement instruction must be preceded by the required ed25519 authorization instruction sequence",
     );
 }

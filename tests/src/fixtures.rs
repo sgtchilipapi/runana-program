@@ -19,6 +19,8 @@ use std::{
 
 pub const CLUSTER_ID_LOCALNET: u8 = 1;
 pub const SIGNATURE_SCHEME_ED25519_DUAL_SIG_V1: u8 = 0;
+pub const SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1: u8 = 0;
+pub const SETTLEMENT_AUTHORIZATION_MODE_PLAYER_ONLY_V1: u8 = 1;
 pub const SCHEMA_VERSION_CANONICAL_V2: u16 = 2;
 pub const ZONE_STATE_UNLOCKED: u8 = 1;
 pub const ZONE_STATE_CLEARED: u8 = 2;
@@ -49,9 +51,11 @@ pub struct CanonicalProgramFixture {
     pub cluster_id: u8,
     pub admin_authority: Pubkey,
     pub trusted_server_signer: Pubkey,
+    pub settlement_authorization_mode: u8,
     pub relayer: Pubkey,
     pub program_config_pubkey: Pubkey,
     pub max_battles_per_batch: u16,
+    pub max_runs_per_batch: u16,
     pub max_histogram_entries_per_batch: u16,
     pub settlement_paused: bool,
 }
@@ -317,9 +321,11 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         cluster_id: CLUSTER_ID_LOCALNET,
         admin_authority,
         trusted_server_signer,
+        settlement_authorization_mode: SETTLEMENT_AUTHORIZATION_MODE_PLAYER_ONLY_V1,
         relayer,
         program_config_pubkey,
         max_battles_per_batch: 32,
+        max_runs_per_batch: 32,
         max_histogram_entries_per_batch: 64,
         settlement_paused: false,
     };
@@ -579,8 +585,10 @@ pub fn initialize_program_config_args_for_fixture(
 ) -> InitializeProgramConfigArgs {
     InitializeProgramConfigArgs {
         trusted_server_signer: fixtures.program.trusted_server_signer,
+        settlement_authorization_mode: fixtures.program.settlement_authorization_mode,
         settlement_paused: fixtures.program.settlement_paused,
         max_battles_per_batch: fixtures.program.max_battles_per_batch,
+        max_runs_per_batch: fixtures.program.max_runs_per_batch,
         max_histogram_entries_per_batch: fixtures.program.max_histogram_entries_per_batch,
     }
 }

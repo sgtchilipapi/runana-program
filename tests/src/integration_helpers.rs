@@ -552,7 +552,7 @@ impl LocalnetRelayerHarness {
         Ok(character_zone_progress_page_pubkey)
     }
 
-    pub fn submit_create_character_with_mismatched_payer(
+    pub fn submit_create_character_with_sponsor_payer(
         &self,
         fixtures: &CanonicalFixtureSet,
     ) -> Result<Signature, Box<dyn Error>> {
@@ -856,6 +856,13 @@ pub fn build_dual_ed25519_verification_instructions(
         build_ed25519_verification_instruction(&server),
         build_ed25519_verification_instruction(&player),
     ]
+}
+
+pub fn build_player_only_ed25519_verification_instructions(
+    fixtures: &CanonicalFixtureSet,
+) -> Vec<Instruction> {
+    let player = sign_player_authorization(fixtures);
+    vec![build_ed25519_verification_instruction(&player)]
 }
 
 fn sign_message(signer: &Keypair, message: &[u8]) -> SignedEd25519Message {

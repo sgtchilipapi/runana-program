@@ -1,7 +1,12 @@
 use crate::{
     fixtures::canonical_authority_keypair,
+    fixtures::SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1,
     fixtures::unique_integration_fixture_set,
-    integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
+    integration_helpers::{
+        build_dual_ed25519_verification_instructions,
+        build_player_only_ed25519_verification_instructions,
+        LocalnetRelayerHarness,
+    },
 };
 use anchor_client::solana_sdk::signature::Signer;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,7 +19,7 @@ fn current_unix_timestamp() -> u64 {
 }
 
 #[test]
-fn test_create_character_requires_player_as_payer() {
+fn test_create_character_allows_sponsor_as_payer() {
     let fixtures = unique_integration_fixture_set();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
@@ -29,20 +34,18 @@ fn test_create_character_requires_player_as_payer() {
         .assert_signature_confirmed(&tx)
         .expect("player-funded character creation should be confirmed");
 
-    let bad_fixtures = unique_integration_fixture_set();
+    let sponsor_funded_fixtures = unique_integration_fixture_set();
     harness
-        .bootstrap_slice1_static_fixture_state(&bad_fixtures)
-        .expect("static fixture state should bootstrap for mismatched payer test");
+        .bootstrap_slice1_static_fixture_state(&sponsor_funded_fixtures)
+        .expect("static fixture state should bootstrap for sponsor payer test");
 
-    let err = harness
-        .submit_create_character_with_mismatched_payer(&bad_fixtures)
-        .expect_err("non-player-funded character creation should fail");
+    let sponsor_tx = harness
+        .submit_create_character_with_sponsor_payer(&sponsor_funded_fixtures)
+        .expect("sponsor-funded character creation should succeed");
 
-    assert!(
-        err.to_string()
-            .contains("Player-owned account creation must be funded by the player authority"),
-        "unexpected error: {err}"
-    );
+    harness
+        .assert_signature_confirmed(&sponsor_tx)
+        .expect("sponsor-funded character creation should be confirmed");
 }
 
 #[test]
@@ -52,12 +55,12 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
     harness
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("slice 1 fixture state should bootstrap");
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("settlement request should build");
 
-    assert_eq!(instructions.len(), 3);
+    assert_eq!(instructions.len(), 2);
 
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
@@ -144,6 +147,26 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
         fixtures.batch.payload.season_id
     );
     assert_eq!(season_policy.season_id, fixtures.season.season_id);
+}
+
+#[test]
+fn test_apply_battle_settlement_batch_v1_accepts_dual_mode_compatibility_flow() {
+    let mut fixtures = unique_integration_fixture_set();
+    fixtures.program.settlement_authorization_mode =
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
+    let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
+    harness
+        .bootstrap_slice1_fixture_state(&fixtures)
+        .expect("slice 1 fixture state should bootstrap");
+
+    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let tx = harness
+        .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
+        .expect("dual-mode compatibility settlement should succeed");
+
+    harness
+        .assert_signature_confirmed(&tx)
+        .expect("dual-mode compatibility settlement should confirm");
 }
 
 #[test]
@@ -247,7 +270,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_create_and_settle_in_same_trans
     let create_instructions = harness
         .build_create_character_instructions(&fixtures, authority.pubkey(), authority.pubkey())
         .expect("create character instructions should build");
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let settlement_instructions = harness
         .build_settlement_request_instructions(&fixtures, &[])
         .expect("settlement request should build");

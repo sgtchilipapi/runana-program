@@ -26,6 +26,8 @@ const SEASON_POLICY_SEED: &[u8] = b"season_policy";
 
 const ACCOUNT_VERSION_V1: u8 = 1;
 const CLUSTER_ID_LOCALNET: u8 = 1;
+const SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1: u8 = 0;
+const SETTLEMENT_AUTHORIZATION_MODE_PLAYER_ONLY_V1: u8 = 1;
 const ZONE_STATE_UNLOCKED: u8 = 1;
 const ZONE_STATE_CLEARED: u8 = 2;
 const ZONE_PAGE_WIDTH: u16 = 256;
@@ -59,6 +61,7 @@ pub mod runana_program {
         config.bump = ctx.bumps.program_config;
         config.admin_authority = ctx.accounts.admin_authority.key();
         config.trusted_server_signer = args.trusted_server_signer;
+        config.settlement_authorization_mode = args.settlement_authorization_mode;
         config.settlement_paused = args.settlement_paused;
         config.max_battles_per_batch = args.max_battles_per_batch;
         config.max_runs_per_batch = args.max_runs_per_batch;
@@ -299,7 +302,7 @@ pub mod runana_program {
             &ctx.accounts.character_settlement_batch_cursor,
             &args.payload,
         )?;
-        verify_server_attestation_preinstruction(&ctx, &args.payload)?;
+        verify_settlement_authorization(&ctx, &args.payload)?;
         verify_time_season_and_throughput(
             &ctx.accounts.character_root,
             &ctx.accounts.character_settlement_batch_cursor,
@@ -543,10 +546,7 @@ pub struct InitializeSeasonPolicy<'info> {
 #[derive(Accounts)]
 #[instruction(args: CreateCharacterArgs)]
 pub struct CreateCharacter<'info> {
-    #[account(
-        mut,
-        constraint = payer.key() == authority.key() @ SettlementError::PlayerMustSelfFund
-    )]
+    #[account(mut)]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
     #[account(
@@ -609,10 +609,7 @@ pub struct CreateCharacter<'info> {
 #[derive(Accounts)]
 #[instruction(args: InitializeCharacterZoneProgressPageArgs)]
 pub struct InitializeCharacterZoneProgressPage<'info> {
-    #[account(
-        mut,
-        constraint = payer.key() == authority.key() @ SettlementError::PlayerMustSelfFund
-    )]
+    #[account(mut)]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
     #[account(
@@ -661,6 +658,7 @@ pub struct ProgramConfigAccount {
     pub bump: u8,
     pub admin_authority: Pubkey,
     pub trusted_server_signer: Pubkey,
+    pub settlement_authorization_mode: u8,
     pub settlement_paused: bool,
     pub max_battles_per_batch: u16,
     pub max_runs_per_batch: u16,
@@ -669,7 +667,7 @@ pub struct ProgramConfigAccount {
 }
 
 impl ProgramConfigAccount {
-    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 1 + 2 + 2 + 2 + 8;
+    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 1 + 1 + 2 + 2 + 2 + 8;
 }
 
 #[account]
@@ -814,6 +812,7 @@ impl CharacterSettlementBatchCursorAccount {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InitializeProgramConfigArgs {
     pub trusted_server_signer: Pubkey,
+    pub settlement_authorization_mode: u8,
     pub settlement_paused: bool,
     pub max_battles_per_batch: u16,
     pub max_runs_per_batch: u16,
@@ -1103,6 +1102,14 @@ fn verify_program_controls(program_config: &ProgramConfigAccount) -> Result<()> 
     require!(
         !program_config.settlement_paused,
         SettlementError::SettlementPaused
+    );
+    require!(
+        matches!(
+            program_config.settlement_authorization_mode,
+            SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1
+                | SETTLEMENT_AUTHORIZATION_MODE_PLAYER_ONLY_V1
+        ),
+        SettlementError::UnsupportedSettlementAuthorizationMode
     );
     Ok(())
 }
@@ -1624,7 +1631,7 @@ fn accumulate_page_summary_bounds(
     Ok(())
 }
 
-fn verify_server_attestation_preinstruction(
+fn verify_settlement_authorization(
     ctx: &Context<ApplyBattleSettlementBatchV1>,
     payload: &SettlementBatchPayloadV1,
 ) -> Result<()> {
@@ -1633,11 +1640,33 @@ fn verify_server_attestation_preinstruction(
         .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?
         as usize;
 
-    require!(
-        current_index >= 1,
-        SettlementError::MissingEd25519Preinstructions
-    );
+    match ctx.accounts.program_config.settlement_authorization_mode {
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1 => {
+            require!(
+                current_index >= 2,
+                SettlementError::MissingEd25519Preinstructions
+            );
+            verify_server_attestation_preinstruction_at_index(ctx, payload, current_index - 2)?;
+            verify_player_authorization_preinstruction_at_index(ctx, payload, current_index - 1)?;
+            Ok(())
+        }
+        SETTLEMENT_AUTHORIZATION_MODE_PLAYER_ONLY_V1 => {
+            require!(
+                current_index >= 1,
+                SettlementError::MissingEd25519Preinstructions
+            );
+            verify_player_authorization_preinstruction_at_index(ctx, payload, current_index - 1)
+        }
+        _ => err!(SettlementError::UnsupportedSettlementAuthorizationMode),
+    }
+}
 
+fn verify_server_attestation_preinstruction_at_index(
+    ctx: &Context<ApplyBattleSettlementBatchV1>,
+    payload: &SettlementBatchPayloadV1,
+    instruction_index: usize,
+) -> Result<()> {
+    let instructions_sysvar = ctx.accounts.instructions_sysvar.to_account_info();
     let expected_server_message = canonical_server_attestation_message(
         ctx.program_id,
         CLUSTER_ID_LOCALNET,
@@ -1647,27 +1676,59 @@ fn verify_server_attestation_preinstruction(
 
     let expected_server_signer = ctx.accounts.program_config.trusted_server_signer;
 
-    for index in (0..current_index).rev() {
-        let instruction = load_instruction_at_checked(index, &instructions_sysvar)
-            .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
-        if instruction.program_id != ed25519_program::ID {
-            continue;
-        }
-
-        let server_ix_payload = parse_ed25519_instruction_payload(&instruction.data)?;
-        let server_signer_matches =
-            server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
-        if server_signer_matches && server_ix_payload.message == expected_server_message.as_slice() {
-            return Ok(());
-        }
+    let server_ix_payload =
+        load_ed25519_instruction_payload_at_index(&instructions_sysvar, instruction_index)?;
+    let server_signer_matches = server_ix_payload.signer_pubkey == expected_server_signer.as_ref();
+    if server_signer_matches && server_ix_payload.message == expected_server_message.as_slice() {
+        return Ok(());
     }
 
     err!(SettlementError::ServerAttestationMismatch)
 }
 
-struct ParsedEd25519InstructionPayload<'a> {
-    signer_pubkey: &'a [u8],
-    message: &'a [u8],
+fn verify_player_authorization_preinstruction_at_index(
+    ctx: &Context<ApplyBattleSettlementBatchV1>,
+    payload: &SettlementBatchPayloadV1,
+    instruction_index: usize,
+) -> Result<()> {
+    let instructions_sysvar = ctx.accounts.instructions_sysvar.to_account_info();
+    let player_ix_payload =
+        load_ed25519_instruction_payload_at_index(&instructions_sysvar, instruction_index)?;
+    let expected_player_message = canonical_player_authorization_message(
+        ctx.program_id,
+        CLUSTER_ID_LOCALNET,
+        ctx.accounts.player_authority.key(),
+        ctx.accounts.character_root.key(),
+        payload.batch_hash,
+        payload.batch_id,
+        payload.signature_scheme,
+    )?;
+
+    let player_signer_matches =
+        player_ix_payload.signer_pubkey == ctx.accounts.player_authority.key().as_ref();
+    require!(
+        player_signer_matches && player_ix_payload.message == expected_player_message.as_slice(),
+        SettlementError::PlayerAuthorizationMismatch
+    );
+    Ok(())
+}
+
+fn load_ed25519_instruction_payload_at_index<'a>(
+    instructions_sysvar: &'a AccountInfo<'a>,
+    instruction_index: usize,
+) -> Result<ParsedEd25519InstructionPayload> {
+    let instruction = load_instruction_at_checked(instruction_index, instructions_sysvar)
+        .map_err(|_| error!(SettlementError::InvalidInstructionsSysvar))?;
+    require!(
+        instruction.program_id == ed25519_program::ID,
+        SettlementError::InvalidEd25519InstructionOrder
+    );
+    parse_ed25519_instruction_payload(&instruction.data)
+}
+
+struct ParsedEd25519InstructionPayload {
+    signer_pubkey: Vec<u8>,
+    message: Vec<u8>,
 }
 
 struct LoadedZoneProgressPage<'info> {
@@ -1675,7 +1736,7 @@ struct LoadedZoneProgressPage<'info> {
     data: CharacterZoneProgressPageAccount,
 }
 
-fn parse_ed25519_instruction_payload(data: &[u8]) -> Result<ParsedEd25519InstructionPayload<'_>> {
+fn parse_ed25519_instruction_payload(data: &[u8]) -> Result<ParsedEd25519InstructionPayload> {
     require!(
         data.len() >= ED25519_OFFSETS_START + ED25519_OFFSETS_SIZE,
         SettlementError::InvalidEd25519InstructionData
@@ -1738,8 +1799,8 @@ fn parse_ed25519_instruction_payload(data: &[u8]) -> Result<ParsedEd25519Instruc
     );
 
     Ok(ParsedEd25519InstructionPayload {
-        signer_pubkey: &data[public_key_offset..public_key_end],
-        message: &data[message_data_offset..message_end],
+        signer_pubkey: data[public_key_offset..public_key_end].to_vec(),
+        message: data[message_data_offset..message_end].to_vec(),
     })
 }
 
@@ -2428,7 +2489,7 @@ pub enum SettlementError {
     InvalidInstructionsSysvar,
     #[msg("One ed25519 verification instruction must precede the settlement instruction")]
     MissingEd25519Preinstructions,
-    #[msg("The settlement instruction must be preceded by the trusted server ed25519 instruction")]
+    #[msg("The settlement instruction must be preceded by the required ed25519 authorization instruction sequence")]
     InvalidEd25519InstructionOrder,
     #[msg("The ed25519 verification instruction data does not match the canonical shape")]
     InvalidEd25519InstructionData,
@@ -2438,6 +2499,8 @@ pub enum SettlementError {
     PlayerAuthorizationMismatch,
     #[msg("The settlement payload uses an unsupported signature scheme")]
     UnsupportedSignatureScheme,
+    #[msg("The program config uses an unsupported settlement authorization mode")]
+    UnsupportedSettlementAuthorizationMode,
     #[msg("The settlement run-sequence range does not match the sealed run summaries")]
     InvalidRunSequenceRange,
     #[msg("The encounter histogram total does not match battle_count")]

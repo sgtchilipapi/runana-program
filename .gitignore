@@ -19,6 +19,7 @@ pnpm-debug.log*
 # Environment and local overrides
 .env
 .env.*
+.local-rust/
 
 # Editor / OS noise
 .DS_Store
