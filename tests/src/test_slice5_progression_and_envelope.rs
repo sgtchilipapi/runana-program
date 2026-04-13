@@ -9,7 +9,9 @@ use crate::{
         ZoneProgressDeltaEntryFixture, CHARACTER_ZONE_PROGRESS_SEED, ZONE_STATE_CLEARED,
         ZONE_STATE_UNLOCKED,
     },
-    integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
+    integration_helpers::{
+        build_player_only_ed25519_verification_instructions, LocalnetRelayerHarness,
+    },
 };
 
 fn rebuild_batch(fixtures: &CanonicalFixtureSet) -> CanonicalFixtureSet {
@@ -69,17 +71,39 @@ fn with_registry_context(
 ) -> CanonicalFixtureSet {
     let mut next = fixtures.clone();
     let program_id = fixtures.program.program_id;
+    let topology_version = fixtures.zone.topology_version;
+    let topology_hash = hashv(&[
+        b"runana_fixture_topology_v1",
+        &zone_id.to_le_bytes(),
+        &topology_version.to_le_bytes(),
+    ])
+    .to_bytes();
 
-    let (zone_registry_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_registry", &zone_id.to_le_bytes()], &program_id);
-    let (zone_enemy_set_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_enemy_set", &zone_id.to_le_bytes()], &program_id);
+    let (zone_registry_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_registry",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
+    let (zone_enemy_set_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_enemy_set",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
     let (enemy_archetype_pubkey, _) = Pubkey::find_program_address(
         &[b"enemy_archetype", &enemy_archetype_id.to_le_bytes()],
         &program_id,
     );
 
     next.zone.zone_id = zone_id;
+    next.zone.topology_version = topology_version;
+    next.zone.topology_hash = topology_hash;
+    next.zone.total_subnode_count = fixtures.zone.total_subnode_count;
     next.zone.page_index_u16 = zone_id / 256;
     next.zone.zone_registry_pubkey = zone_registry_pubkey;
     next.zone.zone_enemy_set_pubkey = zone_enemy_set_pubkey;
@@ -147,7 +171,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_locked_to_cleared_transition() 
         }];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("locked to cleared transition should fail");
@@ -192,7 +216,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_missing_secondary_zone_progress
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("alternate registry fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("settlement instructions should build");
@@ -235,7 +259,8 @@ fn test_apply_battle_settlement_batch_v1_supports_sequential_multi_page_progress
         .expect("secondary zone progress page should initialize");
 
     let batch_one = base.clone();
-    let batch_one_pre_instructions = build_dual_ed25519_verification_instructions(&batch_one);
+    let batch_one_pre_instructions =
+        build_player_only_ed25519_verification_instructions(&batch_one);
     let tx = harness
         .submit_settlement_with_pre_instructions(&batch_one, &batch_one_pre_instructions)
         .expect("first sequential batch should succeed");
@@ -281,7 +306,8 @@ fn test_apply_battle_settlement_batch_v1_supports_sequential_multi_page_progress
         .bootstrap_slice1_fixture_state(&batch_two)
         .expect("second batch registry fixture state should bootstrap");
 
-    let batch_two_pre_instructions = build_dual_ed25519_verification_instructions(&batch_two);
+    let batch_two_pre_instructions =
+        build_player_only_ed25519_verification_instructions(&batch_two);
     let tx = harness
         .submit_settlement_with_pre_instructions_and_extra_pages(
             &batch_two,

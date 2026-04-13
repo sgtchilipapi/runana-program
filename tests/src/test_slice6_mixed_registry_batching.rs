@@ -8,7 +8,9 @@ use crate::{
         CanonicalFixtureSet, EncounterCountEntryFixture, ZoneProgressDeltaEntryFixture,
         ZONE_STATE_UNLOCKED,
     },
-    integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
+    integration_helpers::{
+        build_player_only_ed25519_verification_instructions, LocalnetRelayerHarness,
+    },
 };
 
 fn rebuild_batch(fixtures: &CanonicalFixtureSet, derived_exp_delta: u32) -> CanonicalFixtureSet {
@@ -293,7 +295,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_mixed_zones_and_enemies() {
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("mixed settlement should succeed");
@@ -355,7 +357,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_multiple_legal_enemies_in_one_z
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("same-zone mixed enemy settlement should succeed");
@@ -415,7 +417,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_missing_zone_registry_account()
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("instructions should build");
@@ -474,7 +476,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_missing_zone_enemy_set_account(
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("instructions should build");
@@ -527,7 +529,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_missing_enemy_registry_account(
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("instructions should build");
@@ -577,7 +579,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_enemy_not_in_zone_membership_se
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("enemy outside zone membership should fail");
@@ -628,7 +630,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_duplicate_registry_account() {
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("instructions should build");
@@ -684,7 +686,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_out_of_order_registry_group() {
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let mut instructions = harness
         .build_settlement_request_instructions(&fixtures, &pre_instructions)
         .expect("instructions should build");
@@ -747,7 +749,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_mixed_exp_overflow() {
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("mixed exp overflow should fail");
@@ -784,7 +786,7 @@ fn test_apply_battle_settlement_batch_v1_supports_sequential_mixed_batches() {
         &[(third_enemy_id, 12)],
     );
 
-    let batch_one_pre_instructions = build_dual_ed25519_verification_instructions(&base);
+    let batch_one_pre_instructions = build_player_only_ed25519_verification_instructions(&base);
     let tx = harness
         .submit_settlement_with_pre_instructions(&base, &batch_one_pre_instructions)
         .expect("first batch should succeed");
@@ -825,7 +827,8 @@ fn test_apply_battle_settlement_batch_v1_supports_sequential_mixed_batches() {
         ];
     });
 
-    let batch_two_pre_instructions = build_dual_ed25519_verification_instructions(&batch_two);
+    let batch_two_pre_instructions =
+        build_player_only_ed25519_verification_instructions(&batch_two);
     let tx = harness
         .submit_settlement_with_pre_instructions(&batch_two, &batch_two_pre_instructions)
         .expect("second mixed batch should succeed");

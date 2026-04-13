@@ -1,13 +1,17 @@
 use crate::{
     fixtures::canonical_authority_keypair,
     fixtures::SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1,
-    fixtures::unique_integration_fixture_set,
+    fixtures::{
+        canonical_batch_hash_preimage, canonical_player_authorization_message,
+        canonical_server_attestation_message, unique_integration_fixture_set,
+        CanonicalBatchFixture, CanonicalFixtureSet, EncounterCountEntryFixture,
+    },
     integration_helpers::{
         build_dual_ed25519_verification_instructions,
-        build_player_only_ed25519_verification_instructions,
-        LocalnetRelayerHarness,
+        build_player_only_ed25519_verification_instructions, LocalnetRelayerHarness,
     },
 };
+use anchor_client::solana_sdk::hash::hashv;
 use anchor_client::solana_sdk::signature::Signer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +20,55 @@ fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_secs()
+}
+
+fn rebuild_batch(fixtures: &CanonicalFixtureSet) -> CanonicalFixtureSet {
+    let payload = fixtures.batch.payload.clone();
+    let batch_hash_preimage = canonical_batch_hash_preimage(&payload);
+    let batch_hash = hashv(&[&batch_hash_preimage]).to_bytes();
+    let server_attestation_message = canonical_server_attestation_message(
+        fixtures.program.program_id,
+        fixtures.program.cluster_id,
+        fixtures.character.character_root_pubkey,
+        &payload,
+        batch_hash,
+    );
+    let player_authorization_message = canonical_player_authorization_message(
+        fixtures.program.program_id,
+        fixtures.program.cluster_id,
+        fixtures.character.authority,
+        fixtures.character.character_root_pubkey,
+        batch_hash,
+        payload.batch_id,
+        payload.signature_scheme,
+    );
+
+    let mut next = fixtures.clone();
+    next.batch = CanonicalBatchFixture {
+        payload,
+        batch_hash,
+        batch_hash_preimage,
+        server_attestation_message,
+        player_authorization_message,
+        derived_exp_delta: fixtures.batch.derived_exp_delta,
+    };
+    next
+}
+
+fn minimized_dual_mode_fixture() -> CanonicalFixtureSet {
+    let mut fixtures = unique_integration_fixture_set();
+    fixtures.program.settlement_authorization_mode =
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
+    fixtures.batch.payload.end_nonce = fixtures.batch.payload.start_nonce;
+    fixtures.batch.payload.battle_count = 1;
+    fixtures.batch.payload.last_battle_ts = fixtures.batch.payload.first_battle_ts;
+    fixtures.batch.payload.end_state_hash = hashv(&[b"slice0_dual_mode_minimal"]).to_bytes();
+    fixtures.batch.payload.encounter_histogram = vec![EncounterCountEntryFixture {
+        zone_id: fixtures.zone.zone_id,
+        enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
+        count: 1,
+    }];
+    rebuild_batch(&fixtures)
 }
 
 #[test]
@@ -151,9 +204,7 @@ fn test_apply_battle_settlement_batch_v1_happy_path() {
 
 #[test]
 fn test_apply_battle_settlement_batch_v1_accepts_dual_mode_compatibility_flow() {
-    let mut fixtures = unique_integration_fixture_set();
-    fixtures.program.settlement_authorization_mode =
-        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
+    let fixtures = minimized_dual_mode_fixture();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&fixtures)

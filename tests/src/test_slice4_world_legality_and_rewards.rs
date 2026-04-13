@@ -9,7 +9,9 @@ use crate::{
         CanonicalBatchFixture, CanonicalBatchPayloadFixture, CanonicalFixtureSet,
         EncounterCountEntryFixture, ZoneProgressDeltaEntryFixture, ZONE_STATE_UNLOCKED,
     },
-    integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
+    integration_helpers::{
+        build_player_only_ed25519_verification_instructions, LocalnetRelayerHarness,
+    },
 };
 
 const CHARACTER_ZONE_PROGRESS_SEED: &[u8] = b"character_zone_progress";
@@ -79,11 +81,30 @@ fn with_registry_context(
     let mut next = fixtures.clone();
     let page_index_u16 = zone_id / 256;
     let program_id = fixtures.program.program_id;
+    let topology_version = fixtures.zone.topology_version;
+    let topology_hash = anchor_client::solana_sdk::hash::hashv(&[
+        b"runana_fixture_topology_v1",
+        &zone_id.to_le_bytes(),
+        &topology_version.to_le_bytes(),
+    ])
+    .to_bytes();
 
-    let (zone_registry_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_registry", &zone_id.to_le_bytes()], &program_id);
-    let (zone_enemy_set_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_enemy_set", &zone_id.to_le_bytes()], &program_id);
+    let (zone_registry_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_registry",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
+    let (zone_enemy_set_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_enemy_set",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
     let (enemy_archetype_pubkey, _) = Pubkey::find_program_address(
         &[b"enemy_archetype", &enemy_archetype_id.to_le_bytes()],
         &program_id,
@@ -98,6 +119,9 @@ fn with_registry_context(
     );
 
     next.zone.zone_id = zone_id;
+    next.zone.topology_version = topology_version;
+    next.zone.topology_hash = topology_hash;
+    next.zone.total_subnode_count = fixtures.zone.total_subnode_count;
     next.zone.page_index_u16 = page_index_u16;
     next.zone.zone_registry_pubkey = zone_registry_pubkey;
     next.zone.zone_enemy_set_pubkey = zone_enemy_set_pubkey;
@@ -152,7 +176,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_illegal_locked_zone_reference()
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("alternate registry fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("locked zone reference should fail");
@@ -187,7 +211,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_illegal_zone_enemy_pair() {
         }];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("illegal zone/enemy pair should fail");
@@ -221,7 +245,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_duplicate_histogram_entries() {
         ];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("duplicate histogram entries should fail");
@@ -251,7 +275,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_zero_count_histogram_entry() {
         }];
     });
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("zero-count histogram entry should fail");
@@ -290,7 +314,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_exp_overflow() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("overflow registry fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("overflowing exp derivation should fail");
@@ -329,7 +353,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_same_batch_zone_unlock_for_lega
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("alternate legal registry fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("same-batch unlock should allow a legal settlement");

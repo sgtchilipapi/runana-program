@@ -207,8 +207,28 @@ impl LocalnetRelayerHarness {
         fee_payer: &Keypair,
         signers: &[&Keypair],
     ) -> Result<Signature, Box<dyn Error>> {
-        let lookup_table = self.create_lookup_table_for_instructions(instructions)?;
         self.ensure_wallet_funded(fee_payer)?;
+        let blockhash = self.program.rpc().get_latest_blockhash()?;
+        let legacy_transaction = Transaction::new_signed_with_payer(
+            instructions,
+            Some(&fee_payer.pubkey()),
+            signers,
+            blockhash,
+        );
+
+        match self
+            .program
+            .rpc()
+            .send_and_confirm_transaction(&legacy_transaction)
+        {
+            Ok(signature) => return Ok(signature),
+            Err(err)
+                if err.to_string().contains("too large")
+                    || err.to_string().contains("VersionedTransaction") => {}
+            Err(err) => return Err(Box::new(err)),
+        }
+
+        let lookup_table = self.create_lookup_table_for_instructions(instructions)?;
         let blockhash = self.program.rpc().get_latest_blockhash()?;
         let message = v0::Message::try_compile(
             &fee_payer.pubkey(),
@@ -502,7 +522,10 @@ impl LocalnetRelayerHarness {
 
     fn ensure_class_registry(&self, fixtures: &CanonicalFixtureSet) -> Result<(), Box<dyn Error>> {
         let class_registry_pubkey = Pubkey::find_program_address(
-            &[b"class_registry", &fixtures.character.class_id.to_le_bytes()],
+            &[
+                b"class_registry",
+                &fixtures.character.class_id.to_le_bytes(),
+            ],
             &runana_program::id(),
         )
         .0;
@@ -639,7 +662,10 @@ impl LocalnetRelayerHarness {
         authority: Pubkey,
     ) -> Result<Vec<Instruction>, ClientError> {
         let class_registry_pubkey = Pubkey::find_program_address(
-            &[b"class_registry", &fixtures.character.class_id.to_le_bytes()],
+            &[
+                b"class_registry",
+                &fixtures.character.class_id.to_le_bytes(),
+            ],
             &runana_program::id(),
         )
         .0;

@@ -9,7 +9,9 @@ use crate::{
         CanonicalBatchFixture, CanonicalBatchPayloadFixture, CanonicalFixtureSet,
         EncounterCountEntryFixture, SEASON_POLICY_SEED,
     },
-    integration_helpers::{build_dual_ed25519_verification_instructions, LocalnetRelayerHarness},
+    integration_helpers::{
+        build_player_only_ed25519_verification_instructions, LocalnetRelayerHarness,
+    },
 };
 
 fn current_unix_timestamp() -> u64 {
@@ -93,19 +95,27 @@ fn assert_err_contains(err: Box<dyn std::error::Error>, expected: &str) {
 fn test_apply_battle_settlement_batch_v1_accepts_delayed_submission_within_grace() {
     let base = unique_integration_fixture_set();
     let now = current_unix_timestamp();
-    let fixtures = with_season(
-        &base,
-        base.batch.payload.season_id,
-        base.season.season_start_ts,
-        base.batch.payload.last_battle_ts,
-        now + 3_600,
+    let season_end_ts = now.saturating_sub(1_800);
+    let fixtures = with_payload(
+        &with_season(
+            &base,
+            base.batch.payload.season_id,
+            base.season.season_start_ts,
+            season_end_ts,
+            now + 3_600,
+        ),
+        |payload| {
+            payload.first_battle_ts = season_end_ts.saturating_sub(120);
+            payload.last_battle_ts = season_end_ts.saturating_sub(60);
+            payload.end_state_hash = hashv(&[b"slice3_delayed_within_grace"]).to_bytes();
+        },
     );
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("delayed submission within grace should succeed");
@@ -119,19 +129,27 @@ fn test_apply_battle_settlement_batch_v1_accepts_delayed_submission_within_grace
 fn test_apply_battle_settlement_batch_v1_rejects_grace_expired_submission() {
     let base = unique_integration_fixture_set();
     let now = current_unix_timestamp();
-    let fixtures = with_season(
-        &base,
-        base.batch.payload.season_id,
-        base.season.season_start_ts,
-        base.batch.payload.last_battle_ts,
-        now.saturating_sub(3_600),
+    let season_end_ts = now.saturating_sub(7_200);
+    let fixtures = with_payload(
+        &with_season(
+            &base,
+            base.batch.payload.season_id,
+            base.season.season_start_ts,
+            season_end_ts,
+            now.saturating_sub(3_600),
+        ),
+        |payload| {
+            payload.first_battle_ts = season_end_ts.saturating_sub(120);
+            payload.last_battle_ts = season_end_ts.saturating_sub(60);
+            payload.end_state_hash = hashv(&[b"slice3_grace_expired"]).to_bytes();
+        },
     );
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("grace-expired submission should fail");
@@ -163,7 +181,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_season_regression() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("season regression should fail");
@@ -183,7 +201,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_pre_season_start_timestamp() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("pre-season-start timestamp should fail");
@@ -224,7 +242,7 @@ fn test_apply_battle_settlement_batch_v1_accepts_throughput_boundary() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let tx = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("throughput boundary should succeed");
@@ -264,7 +282,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_throughput_overflow() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("throughput overflow should fail");

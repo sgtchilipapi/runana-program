@@ -6,12 +6,13 @@ use crate::{
         canonical_authority_keypair, canonical_batch_hash_preimage,
         canonical_player_authorization_message, canonical_server_attestation_message,
         canonical_server_signer_keypair, unique_integration_fixture_set, CanonicalBatchFixture,
-        CanonicalBatchPayloadFixture, CanonicalFixtureSet,
+        CanonicalBatchPayloadFixture, CanonicalFixtureSet, EncounterCountEntryFixture,
         SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1,
     },
     integration_helpers::{
         build_dual_ed25519_verification_instructions, build_ed25519_verification_instruction,
-        sign_arbitrary_message, sign_server_attestation, LocalnetRelayerHarness,
+        build_player_only_ed25519_verification_instructions, sign_arbitrary_message,
+        sign_server_attestation, LocalnetRelayerHarness,
     },
 };
 
@@ -50,6 +51,22 @@ fn with_payload(
     next
 }
 
+fn minimized_dual_mode_fixture() -> CanonicalFixtureSet {
+    let mut fixtures = unique_integration_fixture_set();
+    fixtures.program.settlement_authorization_mode =
+        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
+    fixtures.batch.payload.end_nonce = fixtures.batch.payload.start_nonce;
+    fixtures.batch.payload.battle_count = 1;
+    fixtures.batch.payload.last_battle_ts = fixtures.batch.payload.first_battle_ts;
+    fixtures.batch.payload.end_state_hash = hashv(&[b"slice2_dual_mode_minimal"]).to_bytes();
+    fixtures.batch.payload.encounter_histogram = vec![EncounterCountEntryFixture {
+        zone_id: fixtures.zone.zone_id,
+        enemy_archetype_id: fixtures.enemy.enemy_archetype_id,
+        count: 1,
+    }];
+    with_payload(&fixtures, fixtures.batch.payload.clone())
+}
+
 fn assert_err_contains(err: Box<dyn std::error::Error>, expected: &str) {
     let rendered = err.to_string();
     assert!(
@@ -66,7 +83,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_replayed_batch() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let signature = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect("first settlement should succeed");
@@ -95,7 +112,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_out_of_order_batch_id() {
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
         .expect_err("out-of-order batch id should fail");
@@ -183,7 +200,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_wrong_character_owner() {
         .expect("fixture state should bootstrap");
 
     let alt_authority = canonical_alt_authority_keypair();
-    let pre_instructions = build_dual_ed25519_verification_instructions(&fixtures);
+    let pre_instructions = build_player_only_ed25519_verification_instructions(&fixtures);
     let instructions = harness
         .build_settlement_request_instructions_with_accounts_and_args(
             &fixtures,
@@ -209,9 +226,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_wrong_character_owner() {
 
 #[test]
 fn test_apply_battle_settlement_batch_v1_rejects_server_signature_domain_mismatch() {
-    let mut fixtures = unique_integration_fixture_set();
-    fixtures.program.settlement_authorization_mode =
-        SETTLEMENT_AUTHORIZATION_MODE_DUAL_SERVER_AND_PLAYER_V1;
+    let fixtures = minimized_dual_mode_fixture();
     let harness = LocalnetRelayerHarness::new().expect("localnet harness should initialize");
     harness
         .bootstrap_slice1_fixture_state(&fixtures)

@@ -1122,13 +1122,15 @@ fn verify_batch_policy_limits(
         payload.run_summaries.len() <= usize::from(program_config.max_runs_per_batch),
         SettlementError::BatchRunCountLimitExceeded
     );
-    let total_histogram_rows = payload.run_summaries.iter().try_fold(0_usize, |acc, summary| {
-        acc.checked_add(summary.rewarded_encounter_histogram.len())
-            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
-    })?;
+    let total_histogram_rows = payload
+        .run_summaries
+        .iter()
+        .try_fold(0_usize, |acc, summary| {
+            acc.checked_add(summary.rewarded_encounter_histogram.len())
+                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
+        })?;
     require!(
-        total_histogram_rows
-            <= usize::from(program_config.max_histogram_entries_per_batch),
+        total_histogram_rows <= usize::from(program_config.max_histogram_entries_per_batch),
         SettlementError::HistogramEntryLimitExceeded
     );
     Ok(())
@@ -1825,12 +1827,13 @@ fn verify_run_sequence_range(payload: &SettlementBatchPayloadV1) -> Result<()> {
 }
 
 fn verify_run_summary_integrity(payload: &SettlementBatchPayloadV1) -> Result<()> {
-    let histogram_total = payload.run_summaries.iter().try_fold(0_u64, |acc, summary| {
-        let summary_total =
-            summary
-                .rewarded_encounter_histogram
-                .iter()
-                .try_fold(0_u64, |summary_acc, entry| {
+    let histogram_total = payload
+        .run_summaries
+        .iter()
+        .try_fold(0_u64, |acc, summary| {
+            let summary_total = summary.rewarded_encounter_histogram.iter().try_fold(
+                0_u64,
+                |summary_acc, entry| {
                     require!(
                         entry.count > 0,
                         SettlementError::ZeroEncounterHistogramEntry
@@ -1838,19 +1841,20 @@ fn verify_run_summary_integrity(payload: &SettlementBatchPayloadV1) -> Result<()
                     summary_acc
                         .checked_add(u64::from(entry.count))
                         .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
-                })?;
+                },
+            )?;
 
-        require!(
-            summary_total == u64::from(summary.rewarded_battle_count),
-            SettlementError::RunRewardedBattleCountMismatch
-        );
-        require!(
-            is_terminal_status_supported(summary.terminal_status),
-            SettlementError::InvalidTerminalStatus
-        );
-        acc.checked_add(summary_total)
-            .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
-    })?;
+            require!(
+                summary_total == u64::from(summary.rewarded_battle_count),
+                SettlementError::RunRewardedBattleCountMismatch
+            );
+            require!(
+                is_terminal_status_supported(summary.terminal_status),
+                SettlementError::InvalidTerminalStatus
+            );
+            acc.checked_add(summary_total)
+                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))
+        })?;
 
     require!(
         histogram_total == u64::from(payload.battle_count),
@@ -1940,9 +1944,10 @@ fn verify_run_native_legality(
                 enemy_archetype_registries,
                 row.enemy_archetype_id,
             )?;
-            rewarded_histogram_total = rewarded_histogram_total
-                .checked_add(u64::from(row.count))
-                .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
+            rewarded_histogram_total =
+                rewarded_histogram_total
+                    .checked_add(u64::from(row.count))
+                    .ok_or_else(|| error!(SettlementError::ArithmeticOverflow))?;
         }
 
         require!(
@@ -1993,10 +1998,17 @@ fn effective_zone_state(
     primary_zone_progress_page: &CharacterZoneProgressPageAccount,
     additional_zone_progress_pages: &[LoadedZoneProgressPage],
 ) -> Result<u8> {
-    if let Some((_, state)) = next_zone_states.iter().find(|(candidate, _)| *candidate == zone_id) {
+    if let Some((_, state)) = next_zone_states
+        .iter()
+        .find(|(candidate, _)| *candidate == zone_id)
+    {
         return Ok(*state);
     }
-    zone_state(zone_id, primary_zone_progress_page, additional_zone_progress_pages)
+    zone_state(
+        zone_id,
+        primary_zone_progress_page,
+        additional_zone_progress_pages,
+    )
 }
 
 fn verify_and_apply_zone_progress_deltas(
@@ -2075,8 +2087,7 @@ fn zone_enemy_set_for_summary(
     zone_enemy_sets
         .iter()
         .find(|zone_enemy_set| {
-            zone_enemy_set.zone_id == zone_id
-                && zone_enemy_set.topology_version == topology_version
+            zone_enemy_set.zone_id == zone_id && zone_enemy_set.topology_version == topology_version
         })
         .ok_or_else(|| error!(SettlementError::MissingZoneEnemySetAccount))
 }

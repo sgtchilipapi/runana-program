@@ -8,10 +8,9 @@ use anchor_client::solana_sdk::{
 };
 use runana_program::{
     ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, InitializeCharacterZoneProgressPageArgs,
-    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs,
-    InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs, InitializeZoneRegistryArgs,
-    RunEncounterCountEntry, SettlementBatchPayloadV1, SettlementRunSummary, ZoneEnemyRuleEntry,
-    ZoneProgressDeltaEntry,
+    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs, InitializeSeasonPolicyArgs,
+    InitializeZoneEnemySetArgs, InitializeZoneRegistryArgs, RunEncounterCountEntry,
+    SettlementBatchPayloadV1, SettlementRunSummary, ZoneEnemyRuleEntry, ZoneProgressDeltaEntry,
 };
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -132,6 +131,7 @@ pub struct CanonicalBatchFixture {
 pub struct CanonicalBatchPayloadFixture {
     pub character_id: [u8; 16],
     pub batch_id: u64,
+    pub initial_zone_id: u16,
     pub start_nonce: u64,
     pub end_nonce: u64,
     pub battle_count: u16,
@@ -158,6 +158,14 @@ pub struct EncounterCountEntryFixture {
     pub zone_id: u16,
     pub enemy_archetype_id: u16,
     pub count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunSummaryFixture {
+    zone_id: u16,
+    rewarded_battle_count: u16,
+    rewarded_encounter_histogram: Vec<EncounterCountEntryFixture>,
+    zone_progress_delta: Vec<ZoneProgressDeltaEntryFixture>,
 }
 
 fn fixture_topology_version() -> u16 {
@@ -312,6 +320,7 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     let payload = CanonicalBatchPayloadFixture {
         character_id,
         batch_id: 1,
+        initial_zone_id: zone_id,
         start_nonce: 1,
         end_nonce: 3,
         battle_count: 3,
@@ -584,25 +593,202 @@ fn put_run_encounter_histogram_vec(out: &mut Vec<u8>, entries: &[EncounterCountE
     }
 }
 
-fn put_run_summaries_vec(out: &mut Vec<u8>, payload: &CanonicalBatchPayloadFixture) {
-    out.extend_from_slice(&(1_u32).to_le_bytes());
-    out.extend_from_slice(&payload.end_nonce.to_le_bytes());
-    let zone_id = payload
-        .encounter_histogram
-        .first()
+fn fixture_total_subnode_count() -> u16 {
+    3
+}
+
+fn grouped_histogram_by_zone(
+    entries: &[EncounterCountEntryFixture],
+) -> Vec<Vec<EncounterCountEntryFixture>> {
+    let mut grouped: Vec<Vec<EncounterCountEntryFixture>> = Vec::new();
+
+    for entry in entries {
+        if let Some(last_group) = grouped.last_mut() {
+            if last_group
+                .first()
+                .map(|candidate: &EncounterCountEntryFixture| candidate.zone_id)
+                == Some(entry.zone_id)
+            {
+                last_group.push(entry.clone());
+                continue;
+            }
+        }
+        grouped.push(vec![entry.clone()]);
+    }
+
+    grouped
+}
+
+fn split_group_into_run_summaries(group: &[EncounterCountEntryFixture]) -> Vec<RunSummaryFixture> {
+    let mut summaries = Vec::new();
+    let mut current_histogram = Vec::new();
+    let mut current_battle_count = 0_u16;
+    let max_battles_per_summary = fixture_total_subnode_count();
+    let zone_id = group.first().map(|entry| entry.zone_id).unwrap_or(0);
+
+    for entry in group {
+        let mut remaining = entry.count;
+        while remaining > 0 {
+            if current_battle_count == max_battles_per_summary {
+                summaries.push(RunSummaryFixture {
+                    zone_id,
+                    rewarded_battle_count: current_battle_count,
+                    rewarded_encounter_histogram: current_histogram,
+                    zone_progress_delta: Vec::new(),
+                });
+                current_histogram = Vec::new();
+                current_battle_count = 0;
+            }
+
+            let available = max_battles_per_summary.saturating_sub(current_battle_count);
+            let chunk_count = remaining.min(available);
+            current_histogram.push(EncounterCountEntryFixture {
+                zone_id: entry.zone_id,
+                enemy_archetype_id: entry.enemy_archetype_id,
+                count: chunk_count,
+            });
+            current_battle_count = current_battle_count.saturating_add(chunk_count);
+            remaining = remaining.saturating_sub(chunk_count);
+        }
+    }
+
+    if current_battle_count > 0 {
+        summaries.push(RunSummaryFixture {
+            zone_id,
+            rewarded_battle_count: current_battle_count,
+            rewarded_encounter_histogram: current_histogram,
+            zone_progress_delta: Vec::new(),
+        });
+    }
+
+    summaries
+}
+
+fn empty_run_summary_fixture(zone_id: u16) -> RunSummaryFixture {
+    RunSummaryFixture {
+        zone_id,
+        rewarded_battle_count: 0,
+        rewarded_encounter_histogram: Vec::new(),
+        zone_progress_delta: Vec::new(),
+    }
+}
+
+fn expanded_run_summaries(payload: &CanonicalBatchPayloadFixture) -> Vec<SettlementRunSummary> {
+    let run_count = payload
+        .end_nonce
+        .saturating_sub(payload.start_nonce)
+        .saturating_add(1) as usize;
+    let mut occupied_summaries = grouped_histogram_by_zone(&payload.encounter_histogram)
+        .into_iter()
+        .flat_map(|group| split_group_into_run_summaries(&group))
+        .collect::<Vec<_>>();
+    let delta_zone_ids = payload
+        .zone_progress_delta
+        .iter()
         .map(|entry| entry.zone_id)
-        .unwrap_or(0);
-    let topology_version = fixture_topology_version();
-    let topology_hash = fixture_topology_hash(zone_id, topology_version);
-    out.extend_from_slice(&zone_id.to_le_bytes());
-    out.extend_from_slice(&topology_version.to_le_bytes());
-    out.extend_from_slice(&topology_hash);
-    out.push(1);
-    out.extend_from_slice(&payload.battle_count.to_le_bytes());
-    out.extend_from_slice(&payload.first_battle_ts.to_le_bytes());
-    out.extend_from_slice(&payload.last_battle_ts.to_le_bytes());
-    put_run_encounter_histogram_vec(out, &payload.encounter_histogram);
-    put_zone_progress_delta_vec(out, &payload.zone_progress_delta);
+        .collect::<Vec<_>>();
+    let first_delta_summary_index = occupied_summaries
+        .iter()
+        .position(|summary| delta_zone_ids.contains(&summary.zone_id));
+
+    if !payload.zone_progress_delta.is_empty() {
+        match first_delta_summary_index {
+            Some(0) => {
+                let mut summary = empty_run_summary_fixture(payload.initial_zone_id);
+                summary.zone_progress_delta = payload.zone_progress_delta.clone();
+                occupied_summaries.insert(0, summary);
+            }
+            Some(index) => {
+                occupied_summaries[index - 1].zone_progress_delta =
+                    payload.zone_progress_delta.clone();
+            }
+            None if occupied_summaries.is_empty() => {
+                let mut summary = empty_run_summary_fixture(payload.initial_zone_id);
+                summary.zone_progress_delta = payload.zone_progress_delta.clone();
+                occupied_summaries.push(summary);
+            }
+            None => {
+                if let Some(last_summary) = occupied_summaries.last_mut() {
+                    last_summary.zone_progress_delta = payload.zone_progress_delta.clone();
+                }
+            }
+        }
+    }
+
+    let empty_prefix_count = run_count.saturating_sub(occupied_summaries.len());
+    let mut summaries = (0..empty_prefix_count)
+        .map(|_| empty_run_summary_fixture(payload.initial_zone_id))
+        .collect::<Vec<_>>();
+    summaries.extend(occupied_summaries);
+
+    summaries
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            let topology_version = fixture_topology_version();
+            let topology_hash = fixture_topology_hash(summary.zone_id, topology_version);
+            SettlementRunSummary {
+                closed_run_sequence: payload.start_nonce.saturating_add(index as u64),
+                zone_id: summary.zone_id,
+                topology_version,
+                topology_hash,
+                terminal_status: 1,
+                rewarded_battle_count: summary.rewarded_battle_count,
+                first_rewarded_battle_ts: payload.first_battle_ts,
+                last_rewarded_battle_ts: payload.last_battle_ts,
+                rewarded_encounter_histogram: summary
+                    .rewarded_encounter_histogram
+                    .into_iter()
+                    .map(|entry| RunEncounterCountEntry {
+                        enemy_archetype_id: entry.enemy_archetype_id,
+                        count: entry.count,
+                    })
+                    .collect(),
+                zone_progress_delta: summary
+                    .zone_progress_delta
+                    .into_iter()
+                    .map(|entry| ZoneProgressDeltaEntry {
+                        zone_id: entry.zone_id,
+                        new_state: entry.new_state,
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn put_run_summaries_vec(out: &mut Vec<u8>, payload: &CanonicalBatchPayloadFixture) {
+    let run_summaries = expanded_run_summaries(payload);
+    out.extend_from_slice(&(run_summaries.len() as u32).to_le_bytes());
+    for summary in run_summaries {
+        out.extend_from_slice(&summary.closed_run_sequence.to_le_bytes());
+        out.extend_from_slice(&summary.zone_id.to_le_bytes());
+        out.extend_from_slice(&summary.topology_version.to_le_bytes());
+        out.extend_from_slice(&summary.topology_hash);
+        out.push(summary.terminal_status);
+        out.extend_from_slice(&summary.rewarded_battle_count.to_le_bytes());
+        out.extend_from_slice(&summary.first_rewarded_battle_ts.to_le_bytes());
+        out.extend_from_slice(&summary.last_rewarded_battle_ts.to_le_bytes());
+        let histogram = summary
+            .rewarded_encounter_histogram
+            .into_iter()
+            .map(|entry| EncounterCountEntryFixture {
+                zone_id: summary.zone_id,
+                enemy_archetype_id: entry.enemy_archetype_id,
+                count: entry.count,
+            })
+            .collect::<Vec<_>>();
+        let deltas = summary
+            .zone_progress_delta
+            .into_iter()
+            .map(|entry| ZoneProgressDeltaEntryFixture {
+                zone_id: entry.zone_id,
+                new_state: entry.new_state,
+            })
+            .collect::<Vec<_>>();
+        put_run_encounter_histogram_vec(out, &histogram);
+        put_zone_progress_delta_vec(out, &deltas);
+    }
 }
 
 fn put_option_u32(out: &mut Vec<u8>, value: Option<u32>) {
@@ -731,14 +917,6 @@ pub fn to_program_batch_payload(
     payload: &CanonicalBatchPayloadFixture,
     batch_hash: [u8; 32],
 ) -> SettlementBatchPayloadV1 {
-    let zone_id = payload
-        .encounter_histogram
-        .first()
-        .map(|entry| entry.zone_id)
-        .unwrap_or(0);
-    let topology_version = fixture_topology_version();
-    let topology_hash = fixture_topology_hash(zone_id, topology_version);
-
     SettlementBatchPayloadV1 {
         character_id: payload.character_id,
         batch_id: payload.batch_id,
@@ -747,32 +925,7 @@ pub fn to_program_batch_payload(
         battle_count: payload.battle_count,
         start_state_hash: payload.start_state_hash,
         end_state_hash: payload.end_state_hash,
-        run_summaries: vec![SettlementRunSummary {
-            closed_run_sequence: payload.end_nonce,
-            zone_id,
-            topology_version,
-            topology_hash,
-            terminal_status: 1,
-            rewarded_battle_count: payload.battle_count,
-            first_rewarded_battle_ts: payload.first_battle_ts,
-            last_rewarded_battle_ts: payload.last_battle_ts,
-            rewarded_encounter_histogram: payload
-                .encounter_histogram
-                .iter()
-                .map(|entry| RunEncounterCountEntry {
-                    enemy_archetype_id: entry.enemy_archetype_id,
-                    count: entry.count,
-                })
-                .collect(),
-            zone_progress_delta: payload
-                .zone_progress_delta
-                .iter()
-                .map(|entry| ZoneProgressDeltaEntry {
-                    zone_id: entry.zone_id,
-                    new_state: entry.new_state,
-                })
-                .collect(),
-        }],
+        run_summaries: expanded_run_summaries(payload),
         optional_loadout_revision: payload.optional_loadout_revision,
         batch_hash,
         first_battle_ts: payload.first_battle_ts,
