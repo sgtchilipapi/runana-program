@@ -7,10 +7,11 @@ use anchor_client::solana_sdk::{
     },
 };
 use runana_program::{
-    ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, EncounterCountEntry,
-    InitializeCharacterZoneProgressPageArgs, InitializeEnemyArchetypeRegistryArgs,
-    InitializeProgramConfigArgs, InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs,
-    InitializeZoneRegistryArgs, SettlementBatchPayloadV1, ZoneProgressDeltaEntry,
+    ApplyBattleSettlementBatchV1Args, CreateCharacterArgs, InitializeCharacterZoneProgressPageArgs,
+    InitializeEnemyArchetypeRegistryArgs, InitializeProgramConfigArgs,
+    InitializeSeasonPolicyArgs, InitializeZoneEnemySetArgs, InitializeZoneRegistryArgs,
+    RunEncounterCountEntry, SettlementBatchPayloadV1, SettlementRunSummary, ZoneEnemyRuleEntry,
+    ZoneProgressDeltaEntry,
 };
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -64,6 +65,8 @@ pub struct CanonicalProgramFixture {
 pub struct CanonicalCharacterFixture {
     pub authority: Pubkey,
     pub character_id: [u8; 16],
+    pub class_id: u16,
+    pub name: String,
     pub character_creation_ts: u64,
     pub season_id_at_creation: u32,
     pub character_root_pubkey: Pubkey,
@@ -96,6 +99,9 @@ pub struct CanonicalCursorFixture {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalZoneFixture {
     pub zone_id: u16,
+    pub topology_version: u16,
+    pub topology_hash: [u8; 32],
+    pub total_subnode_count: u16,
     pub page_index_u16: u16,
     pub zone_registry_pubkey: Pubkey,
     pub zone_enemy_set_pubkey: Pubkey,
@@ -154,6 +160,19 @@ pub struct EncounterCountEntryFixture {
     pub count: u16,
 }
 
+fn fixture_topology_version() -> u16 {
+    1
+}
+
+fn fixture_topology_hash(zone_id: u16, topology_version: u16) -> [u8; 32] {
+    hashv(&[
+        b"runana_fixture_topology_v1",
+        &zone_id.to_le_bytes(),
+        &topology_version.to_le_bytes(),
+    ])
+    .to_bytes()
+}
+
 pub fn canonical_fixture_set() -> CanonicalFixtureSet {
     canonical_fixture_set_with_discriminator(0)
 }
@@ -165,6 +184,8 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     let trusted_server_signer = canonical_server_signer_keypair().pubkey();
     let relayer = canonical_relayer_keypair().pubkey();
     let mut character_id = *b"char_fixture_000";
+    let class_id = 1_u16;
+    let name = "FixtureHero".to_string();
     character_id[8..16].copy_from_slice(&discriminator.to_le_bytes());
     let character_creation_ts: u64 = 1_720_000_000;
     let season_id_at_creation = 1_u32.saturating_add((discriminator as u32) & 0x3fff_ffff);
@@ -180,6 +201,9 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         1_042_u16.saturating_add(unique_registry_offset)
     };
     let page_index_u16: u16 = zone_id / 256;
+    let topology_version = fixture_topology_version();
+    let topology_hash = fixture_topology_hash(zone_id, topology_version);
+    let total_subnode_count = 3_u16;
 
     let (program_config_pubkey, _) =
         Pubkey::find_program_address(&[b"program_config"], &program_id);
@@ -207,10 +231,22 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
         &[CHARACTER_BATCH_CURSOR_SEED, character_root_pubkey.as_ref()],
         &program_id,
     );
-    let (zone_registry_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_registry", &zone_id.to_le_bytes()], &program_id);
-    let (zone_enemy_set_pubkey, _) =
-        Pubkey::find_program_address(&[b"zone_enemy_set", &zone_id.to_le_bytes()], &program_id);
+    let (zone_registry_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_registry",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
+    let (zone_enemy_set_pubkey, _) = Pubkey::find_program_address(
+        &[
+            b"zone_enemy_set",
+            &zone_id.to_le_bytes(),
+            &topology_version.to_le_bytes(),
+        ],
+        &program_id,
+    );
     let (enemy_archetype_pubkey, _) = Pubkey::find_program_address(
         &[b"enemy_archetype", &enemy_archetype_id.to_le_bytes()],
         &program_id,
@@ -232,6 +268,8 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
     let character = CanonicalCharacterFixture {
         authority,
         character_id,
+        class_id,
+        name,
         character_creation_ts,
         season_id_at_creation,
         character_root_pubkey,
@@ -253,6 +291,9 @@ pub fn canonical_fixture_set_with_discriminator(discriminator: u64) -> Canonical
 
     let zone = CanonicalZoneFixture {
         zone_id,
+        topology_version,
+        topology_hash,
+        total_subnode_count,
         page_index_u16,
         zone_registry_pubkey,
         zone_enemy_set_pubkey,
@@ -379,8 +420,7 @@ pub fn canonical_batch_hash_preimage(payload: &CanonicalBatchPayloadFixture) -> 
     out.extend_from_slice(&payload.season_id.to_le_bytes());
     out.extend_from_slice(&payload.start_state_hash);
     out.extend_from_slice(&payload.end_state_hash);
-    put_zone_progress_delta_vec(&mut out, &payload.zone_progress_delta);
-    put_encounter_histogram_vec(&mut out, &payload.encounter_histogram);
+    put_run_summaries_vec(&mut out, payload);
     put_option_u32(&mut out, payload.optional_loadout_revision);
     out.extend_from_slice(&payload.schema_version.to_le_bytes());
     out.push(payload.signature_scheme);
@@ -408,8 +448,7 @@ pub fn canonical_server_attestation_message(
     out.extend_from_slice(&payload.season_id.to_le_bytes());
     out.extend_from_slice(&payload.start_state_hash);
     out.extend_from_slice(&payload.end_state_hash);
-    put_zone_progress_delta_vec(&mut out, &payload.zone_progress_delta);
-    put_encounter_histogram_vec(&mut out, &payload.encounter_histogram);
+    put_run_summaries_vec(&mut out, payload);
     put_option_u32(&mut out, payload.optional_loadout_revision);
     out.extend_from_slice(&batch_hash);
     out.extend_from_slice(&payload.schema_version.to_le_bytes());
@@ -537,6 +576,35 @@ fn put_encounter_histogram_vec(out: &mut Vec<u8>, entries: &[EncounterCountEntry
     }
 }
 
+fn put_run_encounter_histogram_vec(out: &mut Vec<u8>, entries: &[EncounterCountEntryFixture]) {
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        out.extend_from_slice(&entry.enemy_archetype_id.to_le_bytes());
+        out.extend_from_slice(&entry.count.to_le_bytes());
+    }
+}
+
+fn put_run_summaries_vec(out: &mut Vec<u8>, payload: &CanonicalBatchPayloadFixture) {
+    out.extend_from_slice(&(1_u32).to_le_bytes());
+    out.extend_from_slice(&payload.end_nonce.to_le_bytes());
+    let zone_id = payload
+        .encounter_histogram
+        .first()
+        .map(|entry| entry.zone_id)
+        .unwrap_or(0);
+    let topology_version = fixture_topology_version();
+    let topology_hash = fixture_topology_hash(zone_id, topology_version);
+    out.extend_from_slice(&zone_id.to_le_bytes());
+    out.extend_from_slice(&topology_version.to_le_bytes());
+    out.extend_from_slice(&topology_hash);
+    out.push(1);
+    out.extend_from_slice(&payload.battle_count.to_le_bytes());
+    out.extend_from_slice(&payload.first_battle_ts.to_le_bytes());
+    out.extend_from_slice(&payload.last_battle_ts.to_le_bytes());
+    put_run_encounter_histogram_vec(out, &payload.encounter_histogram);
+    put_zone_progress_delta_vec(out, &payload.zone_progress_delta);
+}
+
 fn put_option_u32(out: &mut Vec<u8>, value: Option<u32>) {
     match value {
         Some(inner) => {
@@ -598,6 +666,9 @@ pub fn initialize_zone_registry_args_for_fixture(
 ) -> InitializeZoneRegistryArgs {
     InitializeZoneRegistryArgs {
         zone_id: fixtures.zone.zone_id,
+        topology_version: fixtures.zone.topology_version,
+        total_subnode_count: fixtures.zone.total_subnode_count,
+        topology_hash: fixtures.zone.topology_hash,
         exp_multiplier_num: fixtures.zone.exp_multiplier_num,
         exp_multiplier_den: fixtures.zone.exp_multiplier_den,
     }
@@ -608,7 +679,16 @@ pub fn initialize_zone_enemy_set_args_for_fixture(
 ) -> InitializeZoneEnemySetArgs {
     InitializeZoneEnemySetArgs {
         zone_id: fixtures.zone.zone_id,
-        allowed_enemy_archetype_ids: fixtures.zone.allowed_enemy_archetype_ids.clone(),
+        topology_version: fixtures.zone.topology_version,
+        enemy_rules: fixtures
+            .zone
+            .allowed_enemy_archetype_ids
+            .iter()
+            .map(|enemy_archetype_id| ZoneEnemyRuleEntry {
+                enemy_archetype_id: *enemy_archetype_id,
+                max_per_run: u16::MAX,
+            })
+            .collect(),
     }
 }
 
@@ -636,6 +716,8 @@ pub fn create_character_args_for_fixture(fixtures: &CanonicalFixtureSet) -> Crea
     CreateCharacterArgs {
         character_id: fixtures.character.character_id,
         initial_unlocked_zone_id: fixtures.zone.zone_id,
+        class_id: fixtures.character.class_id,
+        name: fixtures.character.name.clone(),
     }
 }
 
@@ -649,31 +731,48 @@ pub fn to_program_batch_payload(
     payload: &CanonicalBatchPayloadFixture,
     batch_hash: [u8; 32],
 ) -> SettlementBatchPayloadV1 {
+    let zone_id = payload
+        .encounter_histogram
+        .first()
+        .map(|entry| entry.zone_id)
+        .unwrap_or(0);
+    let topology_version = fixture_topology_version();
+    let topology_hash = fixture_topology_hash(zone_id, topology_version);
+
     SettlementBatchPayloadV1 {
         character_id: payload.character_id,
         batch_id: payload.batch_id,
-        start_nonce: payload.start_nonce,
-        end_nonce: payload.end_nonce,
+        start_run_sequence: payload.start_nonce,
+        end_run_sequence: payload.end_nonce,
         battle_count: payload.battle_count,
         start_state_hash: payload.start_state_hash,
         end_state_hash: payload.end_state_hash,
-        zone_progress_delta: payload
-            .zone_progress_delta
-            .iter()
-            .map(|entry| ZoneProgressDeltaEntry {
-                zone_id: entry.zone_id,
-                new_state: entry.new_state,
-            })
-            .collect(),
-        encounter_histogram: payload
-            .encounter_histogram
-            .iter()
-            .map(|entry| EncounterCountEntry {
-                zone_id: entry.zone_id,
-                enemy_archetype_id: entry.enemy_archetype_id,
-                count: entry.count,
-            })
-            .collect(),
+        run_summaries: vec![SettlementRunSummary {
+            closed_run_sequence: payload.end_nonce,
+            zone_id,
+            topology_version,
+            topology_hash,
+            terminal_status: 1,
+            rewarded_battle_count: payload.battle_count,
+            first_rewarded_battle_ts: payload.first_battle_ts,
+            last_rewarded_battle_ts: payload.last_battle_ts,
+            rewarded_encounter_histogram: payload
+                .encounter_histogram
+                .iter()
+                .map(|entry| RunEncounterCountEntry {
+                    enemy_archetype_id: entry.enemy_archetype_id,
+                    count: entry.count,
+                })
+                .collect(),
+            zone_progress_delta: payload
+                .zone_progress_delta
+                .iter()
+                .map(|entry| ZoneProgressDeltaEntry {
+                    zone_id: entry.zone_id,
+                    new_state: entry.new_state,
+                })
+                .collect(),
+        }],
         optional_loadout_revision: payload.optional_loadout_revision,
         batch_hash,
         first_battle_ts: payload.first_battle_ts,

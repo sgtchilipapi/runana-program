@@ -104,10 +104,20 @@ fn ensure_zone_bundle(
     allowed_enemy_archetype_ids: Vec<u16>,
     enemies: &[(u16, u32)],
 ) {
+    let topology_version = fixtures.zone.topology_version;
+    let topology_hash = hashv(&[
+        b"runana_fixture_topology_v1",
+        &zone_id.to_le_bytes(),
+        &topology_version.to_le_bytes(),
+    ])
+    .to_bytes();
     harness
         .ensure_zone_registry_entry(
             fixtures.program.program_config_pubkey,
             zone_id,
+            topology_version,
+            fixtures.zone.total_subnode_count,
+            topology_hash,
             exp_multiplier_num,
             exp_multiplier_den,
         )
@@ -116,7 +126,14 @@ fn ensure_zone_bundle(
         .upsert_zone_enemy_set_entry(
             fixtures.program.program_config_pubkey,
             zone_id,
-            allowed_enemy_archetype_ids,
+            topology_version,
+            allowed_enemy_archetype_ids
+                .into_iter()
+                .map(|enemy_archetype_id| runana_program::ZoneEnemyRuleEntry {
+                    enemy_archetype_id,
+                    max_per_run: u16::MAX,
+                })
+                .collect(),
         )
         .expect("zone enemy set should initialize");
     for (enemy_archetype_id, exp_reward_base) in enemies {

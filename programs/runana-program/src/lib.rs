@@ -1713,8 +1713,8 @@ fn verify_player_authorization_preinstruction_at_index(
     Ok(())
 }
 
-fn load_ed25519_instruction_payload_at_index<'a>(
-    instructions_sysvar: &'a AccountInfo<'a>,
+fn load_ed25519_instruction_payload_at_index(
+    instructions_sysvar: &AccountInfo<'_>,
     instruction_index: usize,
 ) -> Result<ParsedEd25519InstructionPayload> {
     let instruction = load_instruction_at_checked(instruction_index, instructions_sysvar)

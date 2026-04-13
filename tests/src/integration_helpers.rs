@@ -24,7 +24,8 @@ use crate::fixtures::{
     create_character_args_for_fixture, initialize_character_zone_progress_page_args,
     initialize_enemy_archetype_registry_args_for_fixture,
     initialize_program_config_args_for_fixture, initialize_season_policy_args_for_fixture,
-    initialize_zone_registry_args_for_fixture, CanonicalFixtureSet, CHARACTER_ZONE_PROGRESS_SEED,
+    initialize_zone_enemy_set_args_for_fixture, initialize_zone_registry_args_for_fixture,
+    CanonicalFixtureSet, CHARACTER_ZONE_PROGRESS_SEED,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +71,7 @@ impl LocalnetRelayerHarness {
         self.ensure_season_policy(fixtures)?;
         self.ensure_zone_registry(fixtures)?;
         self.ensure_zone_enemy_set(fixtures)?;
+        self.ensure_class_registry(fixtures)?;
         self.ensure_enemy_archetype_registry(fixtures)?;
         Ok(())
     }
@@ -261,11 +263,18 @@ impl LocalnetRelayerHarness {
         &self,
         program_config_pubkey: Pubkey,
         zone_id: u16,
+        topology_version: u16,
+        total_subnode_count: u16,
+        topology_hash: [u8; 32],
         exp_multiplier_num: u16,
         exp_multiplier_den: u16,
     ) -> Result<Pubkey, Box<dyn Error>> {
         let zone_registry_pubkey = Pubkey::find_program_address(
-            &[b"zone_registry", &zone_id.to_le_bytes()],
+            &[
+                b"zone_registry",
+                &zone_id.to_le_bytes(),
+                &topology_version.to_le_bytes(),
+            ],
             &runana_program::id(),
         )
         .0;
@@ -289,6 +298,9 @@ impl LocalnetRelayerHarness {
             .args(runana_program::instruction::InitializeZoneRegistry {
                 args: runana_program::InitializeZoneRegistryArgs {
                     zone_id,
+                    topology_version,
+                    total_subnode_count,
+                    topology_hash,
                     exp_multiplier_num,
                     exp_multiplier_den,
                 },
@@ -303,10 +315,15 @@ impl LocalnetRelayerHarness {
         &self,
         program_config_pubkey: Pubkey,
         zone_id: u16,
-        allowed_enemy_archetype_ids: Vec<u16>,
+        topology_version: u16,
+        enemy_rules: Vec<runana_program::ZoneEnemyRuleEntry>,
     ) -> Result<Pubkey, Box<dyn Error>> {
         let zone_enemy_set_pubkey = Pubkey::find_program_address(
-            &[b"zone_enemy_set", &zone_id.to_le_bytes()],
+            &[
+                b"zone_enemy_set",
+                &zone_id.to_le_bytes(),
+                &topology_version.to_le_bytes(),
+            ],
             &runana_program::id(),
         )
         .0;
@@ -326,7 +343,8 @@ impl LocalnetRelayerHarness {
                 .args(runana_program::instruction::UpdateZoneEnemySet {
                     args: runana_program::UpdateZoneEnemySetArgs {
                         zone_id,
-                        allowed_enemy_archetype_ids,
+                        topology_version,
+                        enemy_rules,
                     },
                 })
                 .signer(&admin)
@@ -346,7 +364,8 @@ impl LocalnetRelayerHarness {
             .args(runana_program::instruction::InitializeZoneEnemySet {
                 args: runana_program::InitializeZoneEnemySetArgs {
                     zone_id,
-                    allowed_enemy_archetype_ids,
+                    topology_version,
+                    enemy_rules,
                 },
             })
             .signer(&admin)
@@ -432,6 +451,9 @@ impl LocalnetRelayerHarness {
         self.ensure_zone_registry_entry(
             fixtures.program.program_config_pubkey,
             args.zone_id,
+            args.topology_version,
+            args.total_subnode_count,
+            args.topology_hash,
             args.exp_multiplier_num,
             args.exp_multiplier_den,
         )?;
@@ -468,11 +490,49 @@ impl LocalnetRelayerHarness {
     }
 
     fn ensure_zone_enemy_set(&self, fixtures: &CanonicalFixtureSet) -> Result<(), Box<dyn Error>> {
+        let args = initialize_zone_enemy_set_args_for_fixture(fixtures);
         self.upsert_zone_enemy_set_entry(
             fixtures.program.program_config_pubkey,
-            fixtures.zone.zone_id,
-            fixtures.zone.allowed_enemy_archetype_ids.clone(),
+            args.zone_id,
+            args.topology_version,
+            args.enemy_rules,
         )?;
+        Ok(())
+    }
+
+    fn ensure_class_registry(&self, fixtures: &CanonicalFixtureSet) -> Result<(), Box<dyn Error>> {
+        let class_registry_pubkey = Pubkey::find_program_address(
+            &[b"class_registry", &fixtures.character.class_id.to_le_bytes()],
+            &runana_program::id(),
+        )
+        .0;
+
+        if self
+            .fetch_anchor_account::<runana_program::ClassRegistryAccount>(class_registry_pubkey)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let admin = canonical_admin_keypair();
+        self.program
+            .request()
+            .accounts(runana_program::accounts::InitializeClassRegistry {
+                payer: self.relayer.pubkey(),
+                admin_authority: admin.pubkey(),
+                program_config: fixtures.program.program_config_pubkey,
+                class_registry: class_registry_pubkey,
+                system_program: anchor_client::solana_sdk::system_program::ID,
+            })
+            .args(runana_program::instruction::InitializeClassRegistry {
+                args: runana_program::InitializeClassRegistryArgs {
+                    class_id: fixtures.character.class_id,
+                    enabled: true,
+                },
+            })
+            .signer(&admin)
+            .send()?;
+
         Ok(())
     }
 
@@ -578,12 +638,18 @@ impl LocalnetRelayerHarness {
         payer: Pubkey,
         authority: Pubkey,
     ) -> Result<Vec<Instruction>, ClientError> {
+        let class_registry_pubkey = Pubkey::find_program_address(
+            &[b"class_registry", &fixtures.character.class_id.to_le_bytes()],
+            &runana_program::id(),
+        )
+        .0;
         self.program
             .request()
             .accounts(runana_program::accounts::CreateCharacter {
                 payer,
                 authority,
                 season_policy: fixtures.season.season_policy_pubkey,
+                class_registry: class_registry_pubkey,
                 character_root: fixtures.character.character_root_pubkey,
                 character_stats: fixtures.character.character_stats_pubkey,
                 character_world_progress: fixtures.character.character_world_progress_pubkey,
@@ -729,11 +795,11 @@ fn canonical_extra_zone_progress_page_pubkeys(
 ) -> Vec<Pubkey> {
     let mut page_indices = Vec::new();
 
-    for entry in &payload.encounter_histogram {
-        push_unique_sorted_u16(&mut page_indices, entry.zone_id / 256);
-    }
-    for entry in &payload.zone_progress_delta {
-        push_unique_sorted_u16(&mut page_indices, entry.zone_id / 256);
+    for run_summary in &payload.run_summaries {
+        push_unique_sorted_u16(&mut page_indices, run_summary.zone_id / 256);
+        for entry in &run_summary.zone_progress_delta {
+            push_unique_sorted_u16(&mut page_indices, entry.zone_id / 256);
+        }
     }
 
     page_indices
@@ -756,16 +822,24 @@ fn canonical_extra_zone_progress_page_pubkeys(
 fn referenced_zone_registry_pubkeys(
     payload: &runana_program::SettlementBatchPayloadV1,
 ) -> Vec<Pubkey> {
-    let mut zone_ids = Vec::new();
-    for entry in &payload.encounter_histogram {
-        push_unique_sorted_u16(&mut zone_ids, entry.zone_id);
+    let mut zone_refs = Vec::new();
+    for run_summary in &payload.run_summaries {
+        let next = (run_summary.zone_id, run_summary.topology_version);
+        if !zone_refs.contains(&next) {
+            zone_refs.push(next);
+            zone_refs.sort_unstable();
+        }
     }
 
-    zone_ids
+    zone_refs
         .into_iter()
-        .map(|zone_id| {
+        .map(|(zone_id, topology_version)| {
             Pubkey::find_program_address(
-                &[b"zone_registry", &zone_id.to_le_bytes()],
+                &[
+                    b"zone_registry",
+                    &zone_id.to_le_bytes(),
+                    &topology_version.to_le_bytes(),
+                ],
                 &runana_program::id(),
             )
             .0
@@ -776,16 +850,24 @@ fn referenced_zone_registry_pubkeys(
 fn referenced_zone_enemy_set_pubkeys(
     payload: &runana_program::SettlementBatchPayloadV1,
 ) -> Vec<Pubkey> {
-    let mut zone_ids = Vec::new();
-    for entry in &payload.encounter_histogram {
-        push_unique_sorted_u16(&mut zone_ids, entry.zone_id);
+    let mut zone_refs = Vec::new();
+    for run_summary in &payload.run_summaries {
+        let next = (run_summary.zone_id, run_summary.topology_version);
+        if !zone_refs.contains(&next) {
+            zone_refs.push(next);
+            zone_refs.sort_unstable();
+        }
     }
 
-    zone_ids
+    zone_refs
         .into_iter()
-        .map(|zone_id| {
+        .map(|(zone_id, topology_version)| {
             Pubkey::find_program_address(
-                &[b"zone_enemy_set", &zone_id.to_le_bytes()],
+                &[
+                    b"zone_enemy_set",
+                    &zone_id.to_le_bytes(),
+                    &topology_version.to_le_bytes(),
+                ],
                 &runana_program::id(),
             )
             .0
@@ -797,8 +879,10 @@ fn referenced_enemy_archetype_pubkeys(
     payload: &runana_program::SettlementBatchPayloadV1,
 ) -> Vec<Pubkey> {
     let mut enemy_ids = Vec::new();
-    for entry in &payload.encounter_histogram {
-        push_unique_sorted_u16(&mut enemy_ids, entry.enemy_archetype_id);
+    for run_summary in &payload.run_summaries {
+        for entry in &run_summary.rewarded_encounter_histogram {
+            push_unique_sorted_u16(&mut enemy_ids, entry.enemy_archetype_id);
+        }
     }
 
     enemy_ids

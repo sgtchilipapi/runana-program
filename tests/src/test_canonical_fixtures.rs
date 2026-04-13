@@ -91,13 +91,16 @@ fn canonical_fixture_maps_to_program_instruction_args() {
         fixtures.batch.payload.character_id
     );
     assert_eq!(args.payload.batch_id, fixtures.batch.payload.batch_id);
+    assert_eq!(args.payload.start_run_sequence, fixtures.batch.payload.start_nonce);
+    assert_eq!(args.payload.end_run_sequence, fixtures.batch.payload.end_nonce);
     assert_eq!(
         args.payload.battle_count,
         fixtures.batch.payload.battle_count
     );
     assert_eq!(args.payload.batch_hash, fixtures.batch.batch_hash);
+    assert_eq!(args.payload.run_summaries.len(), 1);
     assert_eq!(
-        args.payload.encounter_histogram.len(),
+        args.payload.run_summaries[0].rewarded_encounter_histogram.len(),
         fixtures.batch.payload.encounter_histogram.len()
     );
 }
