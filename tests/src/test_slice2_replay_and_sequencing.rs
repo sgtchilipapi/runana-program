@@ -128,7 +128,6 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_permit_with_wrong_batch_
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let server_signed = sign_server_attestation(&fixtures);
     let wrong_batch_hash = hashv(&[b"wrong_batch_hash"]).to_bytes();
     let wrong_player_message = canonical_player_authorization_message(
         fixtures.program.program_id,
@@ -141,10 +140,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_permit_with_wrong_batch_
     );
     let player_signed =
         sign_arbitrary_message(&canonical_authority_keypair(), &wrong_player_message);
-    let pre_instructions = vec![
-        build_ed25519_verification_instruction(&server_signed),
-        build_ed25519_verification_instruction(&player_signed),
-    ];
+    let pre_instructions = vec![build_ed25519_verification_instruction(&player_signed)];
 
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
@@ -164,7 +160,6 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_permit_with_wrong_batch_
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let server_signed = sign_server_attestation(&fixtures);
     let wrong_player_message = canonical_player_authorization_message(
         fixtures.program.program_id,
         fixtures.program.cluster_id,
@@ -176,10 +171,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_permit_with_wrong_batch_
     );
     let player_signed =
         sign_arbitrary_message(&canonical_authority_keypair(), &wrong_player_message);
-    let pre_instructions = vec![
-        build_ed25519_verification_instruction(&server_signed),
-        build_ed25519_verification_instruction(&player_signed),
-    ];
+    let pre_instructions = vec![build_ed25519_verification_instruction(&player_signed)];
 
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
@@ -268,7 +260,6 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_signature_domain_mismatc
         .bootstrap_slice1_fixture_state(&fixtures)
         .expect("fixture state should bootstrap");
 
-    let server_signed = sign_server_attestation(&fixtures);
     let wrong_player_message = canonical_player_authorization_message(
         fixtures.program.program_id,
         fixtures.program.cluster_id + 1,
@@ -280,10 +271,7 @@ fn test_apply_battle_settlement_batch_v1_rejects_player_signature_domain_mismatc
     );
     let player_signed =
         sign_arbitrary_message(&canonical_authority_keypair(), &wrong_player_message);
-    let pre_instructions = vec![
-        build_ed25519_verification_instruction(&server_signed),
-        build_ed25519_verification_instruction(&player_signed),
-    ];
+    let pre_instructions = vec![build_ed25519_verification_instruction(&player_signed)];
 
     let err = harness
         .submit_settlement_with_pre_instructions(&fixtures, &pre_instructions)
