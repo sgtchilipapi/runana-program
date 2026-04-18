@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-runana_program = "FeZgz7XaSXg9uEpC4Lh3fPSYpFmYWdUQ1GNyWX8Heskg"
+runana_program = "CaUejpPZoNjFmSrkfbazrjBUXE8FK1c2Hoz64NFsTfLm"
 
 [registry]
 url = "https://api.apr.dev"

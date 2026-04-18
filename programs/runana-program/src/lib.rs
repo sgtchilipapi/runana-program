@@ -7,7 +7,7 @@ use anchor_lang::{
 };
 use solana_program::{ed25519_program, hash::hashv};
 
-declare_id!("FeZgz7XaSXg9uEpC4Lh3fPSYpFmYWdUQ1GNyWX8Heskg");
+declare_id!("CaUejpPZoNjFmSrkfbazrjBUXE8FK1c2Hoz64NFsTfLm");
 
 const PROGRAM_CONFIG_SEED: &[u8] = b"program_config";
 const SIGNATURE_SCHEME_ED25519_RAW_V1: u8 = 0;
